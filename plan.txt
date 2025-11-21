@@ -1,0 +1,700 @@
+
+An Architectural Blueprint for an Open-Source 2.5D CAM System in Rust
+
+
+Section 1: A Strategic Framework for an Open-Source CAM System
+
+The development of a Computer-Aided Manufacturing (CAM) system, even one focused on the 2.5D domain of Vectric's V-Carve 1, is a significant undertaking. It requires a robust marriage of two distinct and highly complex disciplines: computational geometry for toolpath calculation and systems programming for a responsive graphical user interface (GUI). A successful strategy for an open-source project, particularly one initiated by a core team of one, must prioritize architectural decisions that lower the barrier to contribution, maximize testability, and create a clear separation of concerns.
+The user's initial hypothesis of a "headless" or config-driven system is not just a viable starting point; it is the correct foundation for a professional-grade, extensible, and maintainable CAM application. This paradigm is best implemented as a "CAM Kernel" and "Application Shell" architecture.
+
+1.1 The CAM Kernel vs. the Application Shell Architecture
+
+This architectural pattern proposes a hard boundary between the core logic of the application and its presentation layer.
+The CAM Kernel (lib.rs)
+This component is a pure Rust library crate, meticulously decoupled from any GUI framework, rendering context, or application-specific logic. It is a "headless" engine that exclusively contains the mathematics and algorithms of CAM.
+Responsibilities:
+Parsing and representing 2D geometry (polygons, curves, lines).
+Storing and managing tool definitions (end mills, v-bits, ball-nose cutters).
+Implementing all toolpath generation algorithms: profiling 2, pocketing 3, v-carving 4, and 3D surface roughing/finishing.1
+Executing the 3D simulation of material removal on a virtual stock.
+API: Its public API is strictly data-in, data-out. Functions will accept Rust-native data structures (e.g., a struct defining a pocket operation, a Vec of polygons, a Tool definition) and return other data structures (e.g., a Vec of 3D points representing the toolpath, a struct representing the final G-code).
+The Application Shell (main.rs)
+This component is the gpui-based 5 executable. It is a consumer of the CAM Kernel. It contains no core CAM logic.
+Responsibilities:
+Managing the main application window and event loop.
+Drawing all UI elements: toolbars, menus, dialog boxes, and parameter-entry fields.6
+Handling all user interaction (mouse clicks, keyboard input, file drag-and-drop).
+Managing application state (e.g., the current project, list of tools, defined operations) using gpui's state management patterns.7
+Importing 2D vector data (e.g., SVG, DXF) and rendering it in a 2D viewport.
+Hosting the 3D simulation viewport, likely by embedding a bevy 8 or raw wgpu 9 context within a custom gpui element.
+File I/O (saving and loading project files).
+API: It calls functions from the CAM Kernel, often in response to user events (e.g., "Generate Toolpath" button click), and then takes the returned data to update its view models and render the result.
+
+1.2 The Strategic Value of the Headless Kernel
+
+This architectural separation is the single most important decision for the long-term health and success of an open-source project of this nature. Its value is multifaceted:
+Testability: A headless CAM Kernel can achieve near-100% unit and integration test coverage. Geometric algorithms can be validated with precision. A test can assert, for example, that profiling a 100x100mm square with a 6mm endmill produces a toolpath with a total length of 412mm, starting at coordinate (X, Y, Z). This deterministic, verifiable, and fast-running test suite is impossible to build if the logic is embedded within a GUI event handler.
+Extensibility and Platform Agnosticism: By isolating the logic, the CAM Kernel becomes platform-agnostic. The same kernel can be compiled to WebAssembly (WASM) and consumed by a web-based front-end. A different contributor could wrap it in egui or slint for an alternative native GUI. The user themselves could maintain a simple command-line-interface (CLI) version for batch processing. This flexibility is a hallmark of professional software.
+Contribution Specialization: This is the key to attracting community-driven development. A Ph.D. in computational geometry can contribute a patch to improve the V-carve algorithm's handling of complex intersections 10 without ever needing to learn gpui's state management 7 or rendering pipeline.11 Conversely, a UI/UX expert can refactor the gpui interface for better usability without understanding the difference between a G0 and a G1 G-code command.12 This decoupling dramatically lowers the barrier to entry for potential contributors.
+Performance: Heavy computational tasks (toolpath generation, simulation) can be moved into a separate thread pool (e.g., using rayon), leaving the gpui application shell responsive on the main thread. The kernel's API naturally lends itself to this async or thread-pool-based execution model.
+
+1.3 Core Data Structures for the Kernel's API
+
+The API contract between the shell and the kernel is defined by its core data structures. These should be established early. While geo-types 13 is an excellent choice, simple Vec-based structures are also viable for an MVP.
+Tool Definition: A Tool struct encapsulates the physical properties of the cutting bit. The ToolType enum is critical for dispatching to the correct toolpath algorithm (e.g., Endmill for profiling, VBit for v-carving).
+
+Rust
+
+
+/// Represents a single tool in the tool library.
+pub struct Tool {
+    pub name: String,
+    pub diameter: f64,
+    /// The percentage of the tool's diameter to step over, e.g., 0.4 for 40%.
+    pub stepover: f64,
+    /// The maximum Z-depth to cut in a single pass.
+    pub pass_depth: f64,
+    /// The specific geometry of the tool.
+    pub tool_type: ToolType,
+}
+
+/// Defines the geometric type of the tool.
+pub enum ToolType {
+    /// A flat-bottomed cylindrical cutter.
+    Endmill { diameter: f64 },
+    /// A V-shaped cutter defined by its included angle.
+    VBit { angle_degrees: f64 },
+    /// A cylindrical cutter with a hemispherical tip.
+    Ballnose { diameter: f64 },
+}
+
+
+Operation Definition: An Operation struct or enum links geometry (identified by an ID or index) to a tool and a set of parameters.
+
+Rust
+
+
+/// Defines which side of the vector to cut.
+pub enum CutSide {
+    Inside,
+    Outside,
+    OnLine,
+}
+
+/// A single CAM operation to be performed.
+pub enum Operation {
+    /// A 2D profile cut along one or more vectors.
+    Profile {
+        /// The final Z-depth for this operation.
+        target_depth: f64,
+        /// The side(s) of the geometry to cut.
+        cut_side: CutSide,
+        /// Index of the tool to use from the tool library.
+        tool_index: usize,
+        /// Indices of the 2D vectors to apply this operation to.
+        vector_indices: Vec<usize>,
+        // Future additions: tabs, ramps, leads.
+    },
+    /// A 2D pocketing operation to clear an area.
+    Pocket {
+        target_depth: f64,
+        tool_index: usize,
+        vector_indices: Vec<usize>,
+        // Future additions: island handling, pocketing strategy (offset/raster).
+    },
+    /// A V-carving operation.
+    VCarve {
+        /// Optional: A maximum depth for flat-bottom v-carving.
+        target_depth: Option<f64>,
+        tool_index: usize,
+        vector_indices: Vec<usize>,
+        /// Optional: A second tool for clearing large areas.
+        clearance_tool_index: Option<usize>,
+    },
+}
+
+
+Kernel Output: The kernel's primary outputs are generic toolpaths and, ultimately, G-code.
+
+Rust
+
+
+/// Represents a complete, continuous 3D tool movement path.
+pub struct Toolpath {
+    /// A list of (X, Y, Z) coordinates.
+    pub paths: Vec<Vec<(f64, f64, f64)>>,
+    // Metadata could include feed rates, spindle speeds, etc.
+}
+
+/// Represents the final, machine-specific G-code output.
+pub struct GCode {
+    /// A list of G-code command strings.
+    pub lines: Vec<String>,
+}
+
+
+
+Section 2: Phase 1: The Headless MVP - A Config-Driven 2D Profile Kernel
+
+This first phase is designed to prove the core architecture and build the foundational "scaffolding" for all future development. The goal is to create a minimal, end-to-end "Hello, World" of CAM: taking a hardcoded 2D shape and a hardcoded tool, generating a single 2D profile toolpath, and outputting a valid G-code file. This entire phase will live within the CAM Kernel and be driven by a simple unit test or a basic main.rs binary.
+
+2.1 Defining the Minimal "Hello, World" of CAM
+
+The objective is to execute the simplest, most common CAM operation: a 2D profile cut.2
+Feature: 2D Profile (Outside cut).16
+Simplifications:
+Single pass depth (no multi-pass logic).
+No tabs.18
+No ramps or leads (simple plunge entry).14
+Inputs (Hardcoded in the test function):
+input_poly: Vec<(f64, f64)> - A list of points defining a 100x100mm square, e.g., [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0), (0.0, 0.0)].
+tool: Tool - A 6mm Endmill (e.g., Tool { diameter: 6.0, tool_type: ToolType::Endmill { diameter: 6.0 },... }).
+op: Operation::Profile - An outside profile cut to a 5mm depth (e.g., Profile { target_depth: 5.0, cut_side: CutSide::Outside,... }).
+
+2.2 The Core Algorithm: Polygon Offsetting with clipper2
+
+The foundational operation for both 2D profiling and 2D offset pocketing is "polygon offsetting" (also known as buffering, inflating, or deflating).19 This is a notoriously difficult problem in computational geometry, involving the robust handling of self-intersections, holes, degeneracies, and winding numbers.20
+Despite a strong mathematics background, implementing a robust polygon-offsetting algorithm from scratch is a significant and unnecessary diversion. The industry has largely standardized on the "Clipper" library for this task. Fortunately, Rust bindings are available, most notably the clipper2 crate.23 This crate will be the geometric heart of the 2D CAM Kernel.
+The clipper2 crate provides an inflate method that is the solution to this problem.25
+MVP Algorithm (Profile Toolpath Generation):
+Define Tool Radius: let radius = tool.diameter / 2.0; (e.g., 3.0mm).
+Define Offset Delta: The "delta" for the inflate function is the distance to offset. For CutSide::Outside, the delta is positive (radius). For CutSide::Inside, the delta is negative (-radius). For CutSide::OnLine, the delta is 0.0 (though this is a special case).
+Calculate Offset Path: Use clipper2 to generate the new path.25 The Path type from clipper2 can be constructed from a Vec of coordinates.
+Rust
+// Assuming 'input_poly' is a 'clipper2::Path'
+let offset_delta = 3.0; // For CutSide::Outside
+let offset_path = input_poly.inflate(
+    offset_delta,
+    clipper2::JoinType::Round, // A good default
+    clipper2::EndType::Polygon, // We are offsetting a closed loop
+    0.0 // Miter limit, not relevant for Round joins
+)?;
+
+
+Convert to 3D: The offset_path is a 2D (X, Y) path representing the centerline of the tool. This must be converted to a 3D toolpath by adding the Z-coordinate. The Z-depth is negative, as Z=0 is typically the top of the material.
+Rust
+let target_z = -op.target_depth; // e.g., -5.0
+let path_3d: Vec<(f64, f64, f64)> = offset_path
+   .points() // Get the Vec<(f64, f64)>
+   .iter()
+   .map(|(x, y)| (*x, *y, target_z))
+   .collect();
+
+
+Return Toolpath: This path_3d is the primary output of the geometry kernel, ready for the next stage.
+
+2.3 The Post-Processor Module
+
+The generated 3D path is machine-agnostic. The final step in the kernel is to translate this generic Toolpath struct into a machine-specific GCode struct.27 This is the job of a "post-processor".29
+For the MVP, a single, simple post-processor function targeting Grbl (a common hobbyist CNC controller standard 30) is sufficient. This module will take the path_3d and wrap it in the necessary G-code commands.
+MVP Post-Processor (fn post_process_grbl(path_3d: &Vec<(f64, f64, f64)>) -> GCode)
+Header:
+G90: Set to Absolute Positioning mode.12
+G21: Set units to millimeters.12
+G17: Select the XY plane.33
+G0 Z10.0: Rapid move (G0) to a "safe height" (e.g., 10mm).12
+Entry Move:
+let start_point = path_3d;
+G0 X{start_point.0} Y{start_point.1}: Rapid move to the start (X, Y) of the toolpath.
+G1 Z{start_point.2} F100: Linear move (G1) to plunge into the material to the target_depth at a set feed rate (F).12
+Cutting Moves:
+Iterate through the rest of the path_3d points (from index 1).
+G1 X{p.0} Y{p.1}: Perform a linear cut for each subsequent point.
+Exit Move:
+G0 Z10.0: Rapid move back to the safe height.
+This function will return a GCode { lines: Vec<String> } containing these commands. Rust crates like gcode 34 or gen_gcode 36 can assist in formatting these commands, but for an MVP, simple string formatting is sufficient.
+
+2.4 Phase 1 Success State
+
+The success of Phase 1 is not a visual. It is a passing unit test: #[test] fn test_square_profile().
+This test will:
+Define the 100x100mm square.
+Define the 6mm endmill and 5mm profile operation.
+Call the (future) cam_kernel::generate_toolpaths(...) function.
+Assert that the returned GCode struct contains the expected commands.
+Critical Assertion: For a 100x100 square (0,0 to 100,100) and a 6mm bit (radius = 3.0) on an outside profile, the offset path corners should be at (-3.0, -3.0) and (103.0, 103.0). The test should assert that a G-code line like "G1 X103.0 Y-3.0" or "G1 X-3.0 Y103.0" exists in the output.
+Completing this phase validates the entire logical pipeline, from geometric input to machine-ready output, and provides the robust foundation for all subsequent features.
+
+Section 3: The Geometric Primitives: A Curated Research Guide
+
+To build a system that competes with V-Carve, it is essential to move beyond the MVP and implement algorithms for pocketing, v-carving, and simulation. This requires a deep understanding of the underlying computational geometry. This section provides the specific, academic, and industry-standard terminology needed for deep research, bridging the gap between a math background and the specialized domain of CAM.
+
+3.1 Purpose
+
+This "Developer-Scholar's" glossary provides the correct search terms to find the technical papers, libraries, and algorithms required to solve the core CAM problems. Knowing the semantic field—the aliases and relationships between terms—is critical for effective research. For example, knowing that V-carving is a "Straight Skeleton" 37 or "Medial Axis" 38 problem unlocks the entire field of research, which in turn leads to "Voronoi Diagrams" 39 as an implementation strategy, and finally to the centerline crate 40 as a practical tool.
+
+3.2 Table: Core CAM Research Terminology
+
+
+Term
+AKA (Also Known As)
+Description
+Application in This Project
+Key Sources
+Polygon Offsetting
+Buffering, Inflating/Deflating
+Creating a new polygon whose boundary is a fixed, parallel distance from the source polygon.
+Core of all 2D Profile and Offset Pocketing. 57
+13
+Polygon Clipping
+Boolean Operations
+Computing the intersection, union, difference (A-B), or XOR of two or more polygons.
+Handling islands in pockets 41, complex shape interactions, and V-carve clearance.
+41
+Straight Skeleton
+-
+A topological skeleton of a polygon composed of straight line segments. Defined by a continuous shrinking process.37
+The most geometrically accurate basis for V-carve toolpaths.
+10
+Medial Axis Transform (MAT)
+Topological Skeleton
+The set of all points within a shape having more than one closest point on the boundary.38
+A (more complex) superset of the Straight Skeleton. Also a basis for V-carve toolpaths.
+38
+Voronoi Diagram
+-
+A partition of a plane into regions based on distance to points (or segments) in a subset.
+The underlying geometric structure used to compute the Medial Axis/Straight Skeleton.39
+39
+Heightmap / Depthmap
+2.5D Raster
+A 2D grid of values (e.g., Vec<f32>) where each cell's value represents a Z-height.
+The core data structure for the 3D toolpath simulation (material removal). 48
+48
+Signed Distance Field (SDF)
+-
+A 3D grid of values where each cell holds the signed distance to the nearest surface.
+An advanced (and more complex) alternative to heightmaps for 3D simulation 50 and 3D model representation.
+50
+Post-Processor
+-
+A software module that converts generic, tool-agnostic toolpaths into machine-specific G-code.
+The final, critical "driver" stage. Essential for making usable output. 27
+27
+
+
+Section 4: Deconstruction of 2.5D Toolpaths: Profiling and Pocketing
+
+Building on the Phase 1 MVP, this section deconstructs the algorithms needed to implement full-featured 2D profiling and pocketing, as seen in products like V-Carve 1 and Fusion 360.17
+
+4.1 Advanced Profiling: Multi-Pass, Tabs, and Ramps
+
+The Phase 1 profile was a single 2D path at a fixed Z. Real-world profiling requires more complex Z-axis control.
+Multi-Pass ("Pass Depths") 53: This feature is necessary when the target_depth is greater than the tool's pass_depth. This is not a complex geometry problem but rather an iterative application of the 2D toolpath.
+Algorithm:
+Calculate the 2D offset path once using clipper2::inflate 25, just as in Phase 1.
+Determine the number of passes: num_passes = (target_depth / tool.pass_depth).ceil().
+Generate N copies of this 2D path, each at a progressively deeper Z-level.
+The final Toolpath struct will contain multiple paths, or one continuous helical path, representing each cutting level.
+for i in 1..=num_passes { let current_z = -min(i as f64 * tool.pass_depth, target_depth);... // add path at current_z }
+Tabs (Bridges) 18: Tabs are small bridges of material left uncut to hold the part in place.
+This is a "path-splitting" and "Z-insertion" operation.
+Algorithm:
+The user specifies tab locations (as 2D points) on the original 2D vector.
+These tab points are mapped to the offset toolpath.
+The post-processor or a "path-linker" module must iterate the offset toolpath. When a tab's start point is reached:
+Split the path.
+Insert new G-code: G0 Z{safe_height_above_tab} (e.g., -1.0mm, assuming tab height is 2mm and cut depth is 3mm), then G1 X... Y... to move across the tab length, then G0 Z{current_cut_depth} to plunge back down.
+Vectric also offers "3D Tabs" 18, which are triangular (ramping up and down). This is a more advanced G-code generation step, replacing the stop-lift-move-plunge with a smooth, 3-axis G1 move.
+Ramps & Leads 14: These are crucial for tool life and surface finish.
+Leads 14: An arc-in/arc-out move that prevents the tool from plunging directly onto the finished edge. This is a 2D geometry problem: calculate a new start/end point and a G2 (clockwise arc) or G3 (counter-clockwise arc) 12 command that moves tangentially from the lead point onto the main profile path.
+Ramps 53: A helical entry into the material. This replaces the simple G1 Z... plunge. Instead of moving Z first, then XY, a ramp move generates G-code that moves in X, Y, and Z simultaneously. This is often represented as a G2 or G3 arc move that also includes a Z parameter, creating a helix.
+
+4.2 Pocketing (Offset Strategy)
+
+Pocketing is the process of removing all material from inside a 2D vector.3 The most common strategy is "contour-parallel" or "offset" pocketing.21
+This is an iterative application of the inward (deflating) offset algorithm from clipper2.
+Algorithm:
+Initialize an empty list: pocket_paths: Vec<Path> =.
+Define the stepover distance: stepover_dist = tool.diameter * tool.stepover (e.g., 6mm * 0.4 = 2.4mm).
+Start with the input polygon: let mut current_pocket = input_polygon;
+Enter a loop:
+Rust
+while true {
+    // Use a *negative* delta to shrink the polygon
+    let offset_result = current_pocket.inflate(
+        -stepover_dist,
+        clipper2::JoinType::Miter, // Miter or Square is common for internal corners
+        clipper2::EndType::Polygon,
+        2.0 // Miter limit
+    )?;
+
+    // If inflating (shrinking) produces no path, we are done.
+    if offset_result.is_empty() {
+        break;
+    }
+
+    pocket_paths.push(offset_result.clone());
+    current_pocket = offset_result;
+}
+
+
+The result is a pocket_paths list containing a set of concentric polygons, like a topographic map. These paths must then be "linked" 57 to create a single, continuous toolpath (e.g., by finding the closest points between loops) and combined with Z-moves for multi-pass pocketing.59
+
+4.3 Pocketing (Zig-Zag / Raster Strategy)
+
+An alternative strategy, common for large, simple areas or for roughing.60
+Algorithm:
+Get the bounding box of the input_polygon.
+Create a series of parallel lines ("raster lines") across the bounding box. These lines are spaced by the stepover_dist.
+The clipper2 library is used again, this time for its clipping (intersection) capabilities.
+let raster_lines =...;
+let toolpath_segments = raster_lines.intersect(input_polygon,...);
+This operation clips the long raster lines, returning only the segments that are inside the pocket polygon.
+These segments must then be stitched together. A "serpentine" or "zig-zag" path is created by linking the end of one segment to the start of the next (which may require a short connecting move at a 90-degree angle).
+Optimization algorithms can be applied to find the optimal inclination angle for the zig-zag to minimize the number of tool retractions.62
+
+4.4 Island Handling
+
+Pockets often contain "islands," or inner boundaries that should not be milled.41 This capability is a key feature of any professional CAM software.
+Handling this looks complex, but the clipper2 library makes it straightforward. It is a boolean "clipping" operation performed before the pocketing algorithm.
+Algorithm:
+The user provides a main_pocket_shape (the outer boundary) and a Vec<island_shape> (the inner boundaries).
+clipper2's boolean operations (which are "polygon-aware" and respect winding-order rules 42) are used to compute the difference.
+let pocket_to_mill = main_pocket_shape.difference(all_island_shapes,...); 25
+The clipper2 library correctly handles this, returning a new, complex polygon (or set of polygons) that represents the exact area to be milled (i.e., the main shape with the islands "punched out").
+This resulting pocket_to_mill shape is then fed into the standard pocketing algorithm (4.2 or 4.3) as if it were a simple polygon. The pocketing algorithm itself does not need to be "island-aware"; the boolean operation handles all the complexity upfront.
+
+Section 5: The V-Carve Algorithm: The Geometric "Secret Sauce"
+
+This is the core, defining feature of a V-Carve competitor. The v-carving algorithm is geometrically distinct from profiling and pocketing, and its implementation requires a completely different set of computational geometry tools.
+
+5.1 The Central Insight: V-Carving is a Medial Axis Problem
+
+The fundamental difference is this:
+2D Profiling: The tool offsets by a constant distance (the tool's radius).
+V-Carving: The tool's Z-depth is variable. It plunges deeper where the 2D shape is wider, and rises as the shape narrows, creating the characteristic "V" shape.
+The toolpath for a v-carve does not follow an offset of the boundary. It follows the center of the shape. The Z-depth at any point on this centerline is a function of the distance from that point to the two nearest boundaries.64 This path, the set of all points equidistant to two or more boundaries, is known in mathematics as the Medial Axis 38 or its close cousin, the Straight Skeleton.37
+A comment in a forum discussing V-carve toolpaths in Carbide Create (a competitor) correctly speculates that the underlying technique is "morphological skeletonization".10 This confirms that the medial axis/skeleton is the correct path forward.
+
+5.2 The Mathematical Foundation
+
+The relationship between v-carve width and depth is governed by basic trigonometry.64 A v-bit with a given angle (e.g., 60°) can be modeled as two right-angle triangles when viewed in cross-section.
+A (Angle) = The angle of the right-triangle, which is half the v-bit's stated angle (e.g., 60° / 2 = 30°).64
+O (Opposite Side) = The distance from the centerline to the boundary, which is half the total width of the cut at that point (e.g., Width / 2).64
+D (Adjacent Side) = The plunge depth of the tool (Z_depth).
+The core trigonometric formula is:
+
+$$\tan(A) = \frac{O}{D}$$
+The CAM software must use two variations of this formula:
+To find the required depth (D) for a given width (2*O):
+
+$$D = \frac{O}{\tan(A)}$$
+$$Z\_depth = \frac{\text{Width} / 2}{\tan(\text{VBit\_Angle} / 2)}$$
+
+This is the core calculation. The software finds the width of the shape at a given point, and this formula tells it how deep to plunge the V-bit.64
+To find the resulting width (2*O) for a given depth (D):
+
+$$O = D \times \tan(A)$$
+$$\text{Width} = 2 \times Z\_depth \times \tan(\text{VBit\_Angle} / 2)$$
+
+This is used for simulation and for "flat-bottom" v-carving, where the cut is limited to a maximum depth.
+
+5.3 Implementation Strategy: The centerline Crate "Silver Bullet"
+
+Implementing a robust Straight Skeleton or Medial Axis Transform (MAT) algorithm from scratch is a Ph.D.-level project.45 It is vastly more complex than polygon offsetting. The user must find a library to do this.
+A search for Rust-native medial axis or straight skeleton libraries reveals the centerline crate.40 This crate is designed to find the center-lines of 2D polygons, precisely what is needed for a V-carve. It uses a Voronoi diagram of the polygon's segments (not just points) as its underlying structure.39 A Rust port of the C++ boostvoronoi library exists to support this.67
+The documentation for the centerline crate 40 contains the critical, "silver bullet" sentence:
+"The Z coordinate is the distance between the 2D center-line, and the geometry that created it."
+This Z coordinate returned by the centerline library is the Opposite Side (O) (or Width / 2) from our trigonometric formula. The library does the hard part of finding the centerline and calculating the distance to the nearest boundary at every point.
+This provides a complete, actionable algorithm for the V-Carve MVP.
+V-Carve MVP Algorithm:
+Input: A set of 2D polygons (e.g., outlines of letters).
+Preparation: Convert the 2D polygon Vec<(f64, f64)> into the segmented input format required by boostvoronoi and centerline.40 This will be the user's primary research task for this phase.
+Initialization: let segments =...; // The prepared 'boost voronoi segments' 40
+let mut centerline = Centerline::<i32, glam::Vec3>::with_segments(segments); 40
+Voronoi Generation: centerline.build_voronoi()?; 40
+Skeleton Calculation: centerline.calculate_centerline(cos_angle, simplification, None)?; 40
+Toolpath Generation: The result is centerline.lines, a Vec of 3D line strings, where each point is (x, y, z_dist).
+Rust
+let tool_angle_rad = tool.vbit_angle.to_radians() / 2.0;
+let tan_a = tool_angle_rad.tan();
+let mut final_toolpath_3d = Vec::new();
+
+// Iterate through every (x, y, z_dist) point in the skeleton
+for point in centerline.lines.iter_points() {
+    let x = point.x;
+    let y = point.y;
+    let o_distance = point.z; // This is 'O' (Width / 2)
+
+    // Calculate the plunge depth 'D'
+    let plunge_depth = o_distance / tan_a;
+
+    // Z is negative
+    final_toolpath_3d.push((x, y, -plunge_depth));
+}
+
+
+Output: This final_toolpath_3d is a complete 3D toolpath that will execute the V-carve. It can be passed directly to the Post-Processor (Section 2.3).
+
+5.4 Advanced V-Carving: Flat Depth and Clearance Tools
+
+These are two core features of Vectric's V-Carve 15 that are simple extensions of the MVP algorithm.
+Flat Depth: This is used to limit the v-carve to a maximum depth, creating a flat bottom.
+Algorithm: This is a simple modification in the final loop.
+let max_depth = op.target_depth.unwrap_or(f64::MAX);
+let plunge_depth = (o_distance / tan_a).min(max_depth);
+final_toolpath_3d.push((x, y, -plunge_depth));
+Clearance Tool: This uses a standard endmill to clear out the large, flat areas created by the "Flat Depth" option.15
+Algorithm: This is a hybrid, two-part operation.
+Part 1 (Boundary Definition): Run the V-Carve algorithm (5.3) first. The V-carve path at the specified max_depth defines the boundary of the flat area to be cleared.
+Part 2 (Pocketing): Run a standard 2D Offset Pocketing operation (Section 4.2) using a flat endmill. The input polygon for this pocketing operation is the boundary generated in Part 1. This requires clipper2 to manage the complex, non-rectangular shapes.
+
+Section 6: The Simulation Engine: Visualizing Material Removal
+
+A key feature of V-Carve is the "Instant Preview" 1, which shows what the final part will look like. This 3D simulation is not just a cosmetic feature; it is an essential verification tool to catch mistakes before machining.68
+
+6.1 Architecture: The "Simulation Kernel"
+
+Following the core architecture, the simulation logic must be isolated in a "Simulation Kernel" within the lib.rs. This kernel's job is to take a definition of the "stock" (the raw material) and a Toolpath object, and return a modified stock object that represents the carved material. This kernel will be headless and testable. The bevy engine's role will be to visualize the data structure returned by this kernel.
+
+6.2 The Core Data Structure: A Dynamic Heightmap
+
+For 2.5D and simple 3D carving, the most effective way to represent the material stock is as a heightmap (also called a depthmap).48 This is a 2D grid of values, where each cell's value represents the Z-height of the material at that (X, Y) point. For 3D roughing and finishing, this is a standard approach.69
+In Rust:
+Rust
+pub struct Stock {
+    /// Number of grid points in the X-dimension.
+    pub width_steps: u32,
+    /// Number of grid points in the Y-dimension.
+    pub height_steps: u32,
+    /// A 1D vector of Z-heights. Access with: data[y * width_steps + x]
+    /// Initialized to 0.0 (top of stock).
+    pub data: Vec<f32>, 
+    //... metadata for (x, y) origin and resolution (mm per step)
+}
+
+
+The Simulation as Image Processing: The simulation is, in effect, an image processing problem. The toolpath "paints" onto this 2D heightmap, and the 3D model (the mesh) is just a visualization of this "image" data. The user's simulation problem is not a complex 3D rendering problem, but a 2D data-manipulation problem.49
+
+6.3 The Simulation Loop (The "Carving" Algorithm)
+
+The kernel's simulate function will iterate along the 3D toolpath and "stamp" the tool's shape into the heightmap at each step.
+Input: A Stock object, a Toolpath (a Vec<(f64, f64, f64)>), and a Tool definition.
+Tool Shape: The Tool's geometry must also be represented as a heightmap "stamp" or a function: get_tool_z(dx, dy) -> f32.
+Endmill: Returns 0.0 inside the radius, f32::INFINITY outside.
+Ballnose: Returns a spherical "dent."
+VBit: Returns a conical "dent."
+Interpolation: A G-code move G1 X100 Y0 is not one step. The toolpath must be interpolated into many small sub-steps (e.g., one step per grid cell) to ensure no detail is missed.
+The "Stamp" Operation: For each interpolated sub-step (x, y, z_plunge):
+Find the corresponding grid cell (grid_x, grid_y) in the Stock.
+Iterate over all Stock grid cells (tx, ty) that are under the tool's footprint.
+For each cell, calculate the tool's height at that point: tool_z_at_point = get_tool_z(dx, dy) + z_plunge;
+Compare the tool's height with the stock's current height. The new height is the minimum of the two, as the tool removes material (lowers the Z-height).
+let stock_idx = ty * width_steps + tx;
+let stock_z = stock.data[stock_idx];
+stock.data[stock_idx] = stock_z.min(tool_z_at_point);
+This core "stamp" operation is highly parallelizable. Because toolpath segments do not (or should not) have overlapping dependencies, the simulation of different segments can be processed in parallel. An experienced Rust developer can leverage the rayon crate to parallelize the main simulation loop over the toolpath segments, resulting in an extremely fast simulation, achieving the "instant preview" goal.1
+
+6.4 The Visualization Output: Meshing the Heightmap
+
+The Stock { data: Vec<f32> } is the result of the simulation kernel. This data must be converted into a 3D mesh (a list of vertices and indices) for bevy to render.
+This is a standard "heightmap meshing" problem.
+Algorithm (Simple Grid Mesh):
+Create an empty Vec<Vertex> and Vec<u32> (for indices).
+Iterate over the Stock grid (but not the last row/column).
+For each grid cell (x, y), consider the 2x2 square of pixels formed by (x, y), (x+1, y), (x, y+1), and (x+1, y+1). These are four points (A, B, C, D) in 3D space, with their Z-values coming from stock.data.
+This 2x2 square (a quad) forms two triangles: (A, B, C) and (C, B, D).
+Add the vertices A, B, C, D to the Vec<Vertex> (calculating normals for lighting) and push their indices onto the Vec<u32> to define the two triangles.
+This generates a single, large 3D mesh that represents the entire carved stock. This mesh data (bevy::render::mesh::Mesh) can be sent directly to the bevy render context.
+This approach is simple, fast, and perfectly suited for the top-down or isometric view common in CAM simulations.49
+
+Section 7: System Architecture: Integrating the Kernel with a gpui Front-End
+
+This section addresses the integration of the headless CAM and Simulation Kernels with the user's chosen stack: the gpui framework 70 for the UI and the bevy engine 71 for 3D rendering.
+
+7.1 gpui and bevy: A Complementary Architecture
+
+The choice of gpui and bevy is not only viable but ideal.
+gpui is a high-performance, GPU-accelerated 2D UI framework designed from the ground up for applications like text editors 11, which share many performance requirements with CAD/CAM (high frame rates, low latency, custom rendering).
+bevy is a modern, data-driven game engine built on wgpu 8, the Rust-native graphics abstraction layer. Its strength is in managing and rendering complex 3D scenes.
+They are not in conflict; they are complementary.72 gpui will serve as the application framework and 2D compositor, while bevy will be the embedded 3D viewport engine.
+The Integration Plan:
+gpui Owns the Loop: The application's main function will be a gpui application: gpui::Application::new().run(...).5 gpui will own the main window, the event loop, and all top-level UI elements (menus, toolbars, side panels).
+bevy as a Library: bevy will be instantiated "headlessly" (without its own windowing or event loop plugins). It will be configured to render to an off-screen texture (a "render target") instead of the main display.
+The Custom gpui Element: A custom gpui Element will be created to house the 3D viewport. This element's "render" function will be responsible for drawing a 2D quad (a rectangle).
+Ticking bevy: In gpui's "draw" or "update" cycle, the main application will manually "tick" the bevy App (i.e., call bevy_app.update()). This will cause bevy's render graph 8 to execute, rendering the 3D scene (the simulated Stock mesh) to the off-screen texture.
+Texture Sharing: The gpui custom element will then be given a handle to this off-screen texture (which wgpu can manage) and will "paint" that texture onto the 2D quad it is responsible for drawing. This composites the 3D scene seamlessly into the 2D gpui interface.
+This architecture is the correct pattern for embedding a 3D engine within a 2D UI framework and provides a clear separation of concerns.
+
+7.2 Data Flow: A Complete User-Interaction Loop
+
+This architecture enables a clean, uni-directional data flow.
+UI Interaction: The user types "5.0" into a gpui::Input element 74 representing the "Target Depth" for a pocket operation.
+State Update: A gpui event handler fires, updating the central application state (e.g., a Model struct managed by gpui's AppContext 7).
+Kernel Invocation (CAM): A state-change listener (or an explicit "Generate Toolpaths" button) triggers a call to the CAM Kernel (Section 4). This call (cam_kernel::generate_toolpaths(...)) runs in a background thread (e.g., via cx.spawn() 5) to avoid blocking the UI.
+Kernel Invocation (Sim): When the CAM Kernel's Future completes, it returns a Vec<Toolpath>. This data is then passed (still in the background) to the Simulation Kernel (Section 6) (sim_kernel::run_simulation(...)).
+Data Generation: The Simulation Kernel computes the final carved Stock and runs the "Meshing" algorithm (Section 6.4) to generate a new Vec<Vertex> and Vec<u32>.
+Render Update: This new mesh data is sent back to the main gpui thread and passed to the bevy "plugin," where it updates bevy's Mesh resource.
+Display: On gpui's next frame (milliseconds later), it "ticks" the bevy app. bevy sees the updated Mesh resource and renders the new 3D model to the off-screen texture. The gpui element then draws this new texture, and the user sees the updated 3D preview.
+G-Code Display: Simultaneously, the Vec<Toolpath> is passed to the Post-Processor (Section 2.3), which generates a GCode struct. The resulting Vec<String> is used to update a gpui text-view model, showing the final G-code to the user.
+
+7.3 Table: Recommended Rust Crate Ecosystem
+
+This ecosystem provides a "curated crates.io" for this specific domain, saving immense research time and providing validated tools for each part of the problem.
+
+Crate
+Purpose
+Key Functions / Structs
+Role
+gpui
+Main UI Framework
+Application, Render, div(), Element
+Application Shell 5
+bevy
+3D Rendering Engine
+bevy_render, Mesh, Camera
+Embedded 3D Preview 8
+clipper2
+2D Geometry Engine
+Paths::inflate(), Paths::difference()
+Profile & Pocketing Kernel 24
+centerline
+2D V-Carve Engine
+Centerline::with_segments(), calculate_centerline()
+V-Carve Kernel 40
+geo-types
+Geometric Primitives
+Polygon, LineString, Point
+Kernel Data Structures 13
+boostvoronoi
+Voronoi Generation
+voronoi_builder
+Dependency for centerline 39
+gcode
+G-Code Generation
+GCode, MCode
+Post-Processor Emitter 34
+usvg / resvg
+SVG Import
+usvg::Tree
+File Import (Phase 4) (Logical next step)
+rayon
+Parallelism
+par_iter()
+Simulation Speedup (Logical optimization)
+
+
+Section 8: A Phased Development Roadmap (The "Order of Operations")
+
+This final section provides the actionable "order of operations" requested. It breaks the "eat the elephant" problem of building a CAM system into a logical, multi-phase project. Each phase builds upon the last and results in a testable, functional-core, validating the headless architecture at each step.
+
+8.1 Purpose
+
+This roadmap is designed to mitigate risk and maintain motivation by providing clear, achievable milestones. It prioritizes solving the most difficult computational geometry problems first, within the isolated CAM Kernel (Phases 1-3), before tackling the complexities of UI and 3D graphics (Phases 4-5).
+
+8.2 Table: Phased Development Roadmap
+
+
+Phase
+Title
+Core Feature(s)
+Key Algos / Crates
+Success-State (What Works)
+Phase 1
+The Headless Kernel (Profile)
+Config-driven 2D Profile (Outside/Inside). Single pass.
+clipper2::inflate(). Basic Grbl Post-Processor.
+A CLI app or unit test: cam-kernel --poly "..." --tool "..." --op "profile_out" > path.nc 25
+Phase 2
+The Headless Kernel (Pocketing)
+2D Offset Pocketing. Island Handling.
+Iterative clipper2::inflate(). clipper2::difference().
+The CLI tool now supports --op "pocket" and handles polygons with holes. 41
+Phase 3
+The Headless Kernel (V-Carve)
+Config-driven V-carving (the core feature).
+centerline crate. Trigonometric Z-depth calculation.
+The CLI tool now supports --op "vcarve" --tool "60deg_vbit". The core CAM Kernel is complete. 40
+Phase 4
+The GUI Shell & 2D View
+gpui application. Import/render 2D SVG. Tool library UI.
+gpui, usvg (for SVG parsing).
+A user can open an SVG, see the 2D vectors, define a tool, and select an operation. (No toolpaths are generated yet). 5
+Phase 5
+The 3D Simulation Engine
+3D preview of material removal.
+Heightmap simulation. bevy + wgpu integration into gpui.
+A user can see the 3D stock. The CAM kernel (P1-3) is wired to the Sim kernel (P5) and displayed in the bevy viewport. 8
+Phase 6
+Full Integration & Polish
+Connect UI (P4) to Kernel (P1-3). Advanced features (Tabs, Ramps).
+Path-splitting (Tabs), Helical interpolation (Ramps).
+A true V-Carve competitor. The user can design, simulate, and export G-code, all from one application. 14
+
+Works cited
+VCarve〡Vectric, accessed November 10, 2025, https://www.vectric.com/products/vcarve/
+VCarve Desktop Tutorials〡Vectric, accessed November 10, 2025, https://www.vectric.com/support/tutorials/vcarve-desktop/?category=2d-toolpaths&video=how-to-use-the-profile-toolpath
+2D Pocket Toolpaths : 7 Steps - Instructables, accessed November 10, 2025, https://www.instructables.com/2D-Pocket-Toolpaths/
+V-Carve Toolpath - Vectric, accessed November 10, 2025, https://docs.vectric.com/docs/V12.0/Aspire/ENU/Help/form/VCarve%20Toolpath%20Creator/
+Getting Started | GPUI Component - GitHub Pages, accessed November 10, 2025, https://longbridge.github.io/gpui-component/docs/getting-started
+Rust GUI components for building fantastic cross-platform desktop application by using GPUI. - GitHub, accessed November 10, 2025, https://github.com/longbridge/gpui-component
+Ownership and data flow in GPUI — Zed's Blog, accessed November 10, 2025, https://zed.dev/blog/gpui-ownership
+Render Architecture Overview - Unofficial Bevy Cheat Book, accessed November 10, 2025, https://bevy-cheatbook.github.io/gpu/intro.html
+[MEDIA] My first renderer using wgpu : r/rust_gamedev - Reddit, accessed November 10, 2025, https://www.reddit.com/r/rust_gamedev/comments/13jb8pw/media_my_first_renderer_using_wgpu/
+Weird v-carve toolpath for joined circles - Carbide 3D Community Site, accessed November 10, 2025, https://community.carbide3d.com/t/weird-v-carve-toolpath-for-joined-circles/23112
+Leveraging Rust and the GPU to render user interfaces at 120 FPS - Zed, accessed November 10, 2025, https://zed.dev/blog/videogame
+G-code Explained | List of Most Important G-code Commands - How To Mechatronics, accessed November 10, 2025, https://howtomechatronics.com/tutorials/g-code-explained-list-of-most-important-g-code-commands/
+geo_offset - Rust - Docs.rs, accessed November 10, 2025, https://docs.rs/geo-offset/
+Profile Toolpath Guide | Vectric V11 Tutorials - YouTube, accessed November 10, 2025, https://www.youtube.com/watch?v=wz3Quhfr91w
+VCarve Toolpath Options in Vectric - YouTube, accessed November 10, 2025, https://www.youtube.com/watch?v=boOKUn6ciV4
+CNC toolpath parameters - Snapmaker Wiki, accessed November 10, 2025, https://wiki.snapmaker.com/en/Snapmaker_Luban/cnc_toolpath_parameters
+Fusion Help | 2D Profile strategy | Autodesk, accessed November 10, 2025, https://help.autodesk.com/view/fusion360/ENU/?guid=MFG-2D-PROFILE-OVERVIEW
+2D Profile Toolpath - Vectric, accessed November 10, 2025, https://docs.vectric.com/docs/V12.0/Aspire/ENU/Help/form/uiProfileMachineForm/index.html
+An algorithm for inflating/deflating offsetting, buffering polygons - Codemia, accessed November 10, 2025, https://codemia.io/knowledge-hub/path/an_algorithm_for_inflatingdeflating_offsetting_buffering_polygons
+An algorithm for inflating/deflating (offsetting, buffering) polygons - Stack Overflow, accessed November 10, 2025, https://stackoverflow.com/questions/1109536/an-algorithm-for-inflating-deflating-offsetting-buffering-polygons
+A Survey of Polygon Offseting Strategies, accessed November 10, 2025, http://fcacciola.50webs.com/Offseting%20Methods.htm
+DAC05OffsetPolygon.pdf - Sara McMains, accessed November 10, 2025, https://mcmains.me.berkeley.edu/pubs/DAC05OffsetPolygon.pdf
+clipper2 - crates.io: Rust Package Registry, accessed November 10, 2025, https://crates.io/crates/clipper2/0.1.2
+clipper2 - crates.io: Rust Package Registry, accessed November 10, 2025, https://crates.io/crates/clipper2
+tirithen/clipper2: A polygon Clipping and Offsetting library for Rust. - GitHub, accessed November 10, 2025, https://github.com/tirithen/clipper2
+clipper2 - Rust, accessed November 10, 2025, https://docs.rs/clipper2/
+What is G-code: Definition, Function, Types & Uses - 3ERP, accessed November 10, 2025, https://www.3erp.com/blog/g-code/
+Post-Processor: Definition, How it Works, and Uses - Xometry, accessed November 10, 2025, https://www.xometry.com/resources/machining/what-is-a-post-processor/
+Everything You Need to Know About G-code & Post-Processors - MEKANIKA, accessed November 10, 2025, https://www.mekanika.io/en/blog/cnc-milling/guide-everything-you-need-to-know-about-g-code-and-post-processors
+CAMWorks GRBL postprocessor · Issue #237 · gnea/grbl - GitHub, accessed November 10, 2025, https://github.com/gnea/grbl/issues/237
+Why do I need a post processor for Solidworks and GRBL? : r/hobbycnc - Reddit, accessed November 10, 2025, https://www.reddit.com/r/hobbycnc/comments/whjyzd/why_do_i_need_a_post_processor_for_solidworks_and/
+G90 and G91 G-Codes - Absolute and Incremental, accessed November 10, 2025, https://gcodetutor.com/gcode-tutorial/g90-g91-gcode.html
+G0-G1: Linear Move - Marlin Firmware, accessed November 10, 2025, https://marlinfw.org/docs/gcode/G000-G001.html
+gcode - Rust - Docs.rs, accessed November 10, 2025, https://docs.rs/gcode
+g-code - crates.io: Rust Package Registry, accessed November 10, 2025, https://crates.io/crates/g-code
+codytrey/gen_gcode: G-Code generator written in Rust - GitHub, accessed November 10, 2025, https://github.com/codytrey/gen_gcode
+Straight skeleton - Wikipedia, accessed November 10, 2025, https://en.wikipedia.org/wiki/Straight_skeleton
+Medial axis - Wikipedia, accessed November 10, 2025, https://en.wikipedia.org/wiki/Medial_axis
+Voronoi Main - Boost, accessed November 10, 2025, https://www.boost.org/doc/libs/latest/libs/polygon/doc/voronoi_main.htm
+centerline - crates.io: Rust Package Registry, accessed November 10, 2025, https://crates.io/crates/centerline
+A Sweep-Line Algorithm and Its Application to Spiral Pocketing - ResearchGate, accessed November 10, 2025, https://www.researchgate.net/profile/Tawfik_El-Midany/publication/228747018_A_sweep-line_algorithm_and_its_application_to_spiral_pocketing/links/5628a31c08aef25a243d19f1/A-sweep-line-algorithm-and-its-application-to-spiral-pocketing.pdf
+Clipper2 - Polygon Clipping and Offsetting Library - angusj.com, accessed November 10, 2025, https://www.angusj.com/clipper2/Docs/Overview.htm
+geo_clipper - Rust - Docs.rs, accessed November 10, 2025, https://docs.rs/geo-clipper/
+geo_buffer - Rust - Docs.rs, accessed November 10, 2025, https://docs.rs/geo-buffer
+Actual implementation of the medial axis transform? - Stack Overflow, accessed November 10, 2025, https://stackoverflow.com/questions/4978588/actual-implementation-of-the-medial-axis-transform
+Shape Simplification Based on the Medial Axis Transform - Computational Imaging Group, accessed November 10, 2025, https://vccimaging.org/Publications/Tam2003SSB/Tam2003SSB.pdf
+Voronoi Basic Tutorial - Boost, accessed November 10, 2025, https://www.boost.org/doc/libs/1_81_0/libs/polygon/doc/voronoi_basic_tutorial.htm
+CNC toolpath generation from heightmaps - James Stanley, accessed November 10, 2025, https://incoherency.co.uk/blog/stories/cnc-heightmap-toolpaths.html
+Fast visualization of heightmap data? : r/GraphicsProgramming, accessed November 10, 2025, https://www.reddit.com/r/GraphicsProgramming/comments/9g54xw/fast_visualization_of_heightmap_data/
+A Toolpath Generator Based on Signed Distance Fields and Clustering Algorithms for Optimized Additive Manufacturing - Aalto Research Portal, accessed November 10, 2025, https://research.aalto.fi/files/163440654/jmmp-08-00199.pdf
+The Power Crust, Unions of Balls, and the Medial Axis Transform - Computer Science | UC Davis Engineering, accessed November 10, 2025, https://web.cs.ucdavis.edu/~amenta/pubs/power.pdf
+How to export G-code / NC code from Fusion - Autodesk, accessed November 10, 2025, https://www.autodesk.com/support/technical/article/caas/sfdcarticles/sfdcarticles/Does-Fusion-360-Write-G-code.html
+How to use the profile toolpath in Vectric software | 2D Toolpaths | V12 Tutorials - YouTube, accessed November 10, 2025, https://www.youtube.com/watch?v=VAvj8KqOuE8
+Fusion Help | 2D Profile reference | Autodesk, accessed November 10, 2025, https://help.autodesk.com/view/fusion360/ENU/?guid=GUID-C14B9F20-3A39-4930-971E-BDFE268384B9
+Intro to Ramps and Leads - Part 44 - Vectric For Absolute Beginners - YouTube, accessed November 10, 2025, https://www.youtube.com/watch?v=qndxWC--rO8
+Makera CAM - Creating 2D Pocket Tool Paths - YouTube, accessed November 10, 2025, https://www.youtube.com/watch?v=NvrFs3Y_DHs
+Tag: pocketing - anderswallin.net, accessed November 10, 2025, http://www.anderswallin.net/tag/pocketing/
+Advanced Inward Pocketing - Router-CIM Automation Suite, accessed November 10, 2025, https://www.cimtechsoftware.com/RouterCIM_Online_Help_2021/index.html?advanced_inward_pocketing.htm
+Inventor CAM Help | Rough the Pocket | Autodesk, accessed November 10, 2025, https://help.autodesk.com/cloudhelp/2020/ENU/INVCAM/files/GUID-FCB01EC2-8955-4075-A229-1D25DA116F0F.htm
+Algorithm for Pocket Milling using Zig-zag Tool Path - ResearchGate, accessed November 10, 2025, https://www.researchgate.net/publication/267701012_Algorithm_for_Pocket_Milling_using_Zig-zag_Tool_Path
+7 CAD-CAM Software Pocket Types and How They Work, accessed November 10, 2025, https://bobcad.com/7-cad-cam-software-pocket-types-and-how-they-work/
+An Algorithm For Reducing Tool Retractions in Zigzag Pocket Machining | PDF | Maxima And Minima | Mathematical Optimization - Scribd, accessed November 10, 2025, https://www.scribd.com/document/96545480/z-gzag
+Journal of Science Tool Path Generation for Pocket Machining Operations with Island - DergiPark, accessed November 10, 2025, https://dergipark.org.tr/tr/download/article-file/342768
+CNC Basics 04 - VCarve Depth Math and Flat Bottom VCarving in Carbide Create, accessed November 10, 2025, https://www.youtube.com/watch?v=5Oqp9RCdxEs
+Exact Medial Axis, Surfaces, Skeletonizations of 3D Polyhedra - Stack Overflow, accessed November 10, 2025, https://stackoverflow.com/questions/5570503/exact-medial-axis-surfaces-skeletonizations-of-3d-polyhedra
+sfcgal - crates.io: Rust Package Registry, accessed November 10, 2025, https://crates.io/crates/sfcgal
+boostvoronoi - crates.io: Rust Package Registry, accessed November 10, 2025, https://crates.io/crates/boostvoronoi
+Simulate the toolpath | Autodesk, accessed November 10, 2025, https://www.autodesk.com/learn/ondemand/tutorial/simulate-the-toolpath
+aewallin/opencamlib: open source computer aided ... - GitHub, accessed November 10, 2025, https://github.com/aewallin/opencamlib
+GPUI (v0.2.0), the GPU-accelerated Rust UI framework that powers Zed, is on crates.io. : r/ZedEditor - Reddit, accessed November 10, 2025, https://www.reddit.com/r/ZedEditor/comments/1o294yn/gpui_v020_the_gpuaccelerated_rust_ui_framework/
+Bevy Render Rework: Initial Framing and Proof of Concept #2265 - GitHub, accessed November 10, 2025, https://github.com/bevyengine/bevy/discussions/2265
+Idea: Create a "static plugins" system like Bevy to create a "build your own editor" ecosystem · zed-industries zed · Discussion #25127 - GitHub, accessed November 10, 2025, https://github.com/zed-industries/zed/discussions/25127
+Making a GUI applications in Bevy? - Reddit, accessed November 10, 2025, https://www.reddit.com/r/bevy/comments/1eo1q7o/making_a_gui_applications_in_bevy/
+gpui, accessed November 10, 2025, https://www.gpui.rs/
+GRBL GCODE BASICS | QBOT MINImill - Desktop CNC Router, accessed November 10, 2025, https://www.minimill.at/en/grbl-gcode-basics/
