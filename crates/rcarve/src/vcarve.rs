@@ -160,29 +160,11 @@ pub fn generate_vcarve_toolpath(
     // Only if max_depth is limited
     if max_depth.is_some() {
         for pl in &shape_polylines {
-            // Offset returns Vec<Polyline>
-            // The "Circle case" issue:
-            // If the circle is CCW (positive area), parallel_offset(negative) shrinks it (inset).
-            // If the resulting path is "outside", it means either:
-            // 1. The input was CW (negative area) and negative offset expanded it.
-            // 2. Cavalier contours convention is different?
-            // We force outer to CCW in normalization.
-            // parallel_offset docs: "Positive delta offsets outwards... Negative delta offsets inwards" (for CCW).
-            // So -max_radius SHOULD be correct for insetting a CCW polygon.
-            
-            // However, if the user says it's generating OUTSIDE, let's verify winding.
-            // shape_polylines are forced CCW (area < 0 check -> invert). Wait!
-            // Cavalier Contours: Area > 0 is CCW.
-            // Line 86: if outer_pl.area() < 0.0 { outer_pl.invert_direction_mut(); }
-            // This ensures area >= 0 (CCW).
-            // So parallel_offset(-val) should be inner.
-            
-            // Maybe the issue is how we interpret "Outside".
-            // If the offset is larger than original?
-            // Let's just stick to the logic: We want to OFFSET INWARDS.
-            // For a CCW polygon, that's negative delta.
-            
-            let offsets = pl.parallel_offset(-max_radius); // Negative for inset (shrink)
+            // Offset inwards: For CCW outer polygons, we want to offset inward (shrink).
+            // For CW holes, we also want to offset inward relative to the carve area.
+            // The cavalier_contours convention: positive delta offsets in the direction
+            // of the left-hand normal (which is inward for CCW polygons).
+            let offsets = pl.parallel_offset(max_radius);
             
             for offset_pl in offsets {
                 let mut points_2d = Vec::new();
