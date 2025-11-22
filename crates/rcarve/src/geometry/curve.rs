@@ -84,6 +84,30 @@ impl Curve {
                 .unwrap_or(false),
         }
     }
+
+    /// Apply an affine transformation to the curve.
+    pub fn apply_affine(&mut self, affine: kurbo::Affine) {
+        match self {
+            Curve::Line(line) => {
+                let p0 = affine * line.p0;
+                let p1 = affine * line.p1;
+                *line = Line::new(p0, p1);
+            }
+            Curve::Circle(circle) => {
+                // Circles under affine transform might become ellipses.
+                // For now, we convert to BezPath to support general affine transforms.
+                // If the transform is uniform scale + rotation + translation, we could keep it as Circle,
+                // but kurbo::Circle doesn't support rotation directly (it's just center + radius).
+                let path = circle.to_path(0.1);
+                let mut bezpath = path;
+                bezpath.apply_affine(affine);
+                *self = Curve::BezPath(bezpath);
+            }
+            Curve::BezPath(path) => {
+                path.apply_affine(affine);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

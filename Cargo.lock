@@ -3037,6 +3037,7 @@ name = "rcarve-iced"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "kurbo 0.12.0",
  "rcarve",
  "rfd",
  "serde",

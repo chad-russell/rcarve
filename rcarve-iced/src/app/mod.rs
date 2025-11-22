@@ -1,6 +1,7 @@
 use iced::keyboard;
 use iced::widget::{button, canvas, center, column, container, pick_list, row, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
+use kurbo::Affine;
 use rcarve::ids::CurveId;
 use rcarve::{CutSide, StockSpec, ToolLibrary, ToolpathArtifact, ToolpathGenerationReport};
 use rfd::AsyncFileDialog;
@@ -92,6 +93,27 @@ pub enum Message {
     CanvasPanStart(iced::Point),
     CanvasPanUpdate(iced::Point),
     CanvasPanEnd,
+    CanvasDragStart {
+        mode: DragMode,
+        cursor_position: iced::Point,
+        import_center: iced::Point,
+    },
+    CanvasDragUpdate(iced::Point),
+    CanvasDragEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragMode {
+    Translate,
+    Rotate,
+}
+
+#[derive(Debug, Clone)]
+pub struct DragState {
+    pub start_cursor_pos: iced::Point,
+    pub start_transform: Affine,
+    pub import_center: iced::Point,
+    pub mode: DragMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +157,7 @@ pub struct App {
     toolpath_segments: HashMap<usize, Vec<Vec<(f32, f32)>>>,
     show_debug_polygons: bool,
     debug_polygons: HashMap<usize, Vec<Vec<(f32, f32)>>>,
+    drag_state: Option<DragState>,
 }
 
 #[derive(Debug, Clone)]
@@ -642,6 +665,76 @@ impl App {
             }
             Message::CanvasPanEnd => {
                 self.camera.pan_start = None;
+                Task::none()
+            }
+            Message::CanvasDragStart {
+                mode,
+                cursor_position,
+                import_center,
+            } => {
+                if let Some(project) = &self.project {
+                    if let Some(import_id) = self.selected_import {
+                        if let Some(import) = project
+                            .data
+                            .imported_svgs
+                            .iter()
+                            .find(|i| i.id == import_id)
+                        {
+                            self.drag_state = Some(DragState {
+                                start_cursor_pos: cursor_position,
+                                start_transform: import.transform,
+                                import_center,
+                                mode,
+                            });
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::CanvasDragUpdate(cursor_position) => {
+                if let Some(drag_state) = &self.drag_state {
+                    if let Some(project) = self.project.as_mut() {
+                        if let Some(import_id) = self.selected_import {
+                            let new_transform = match drag_state.mode {
+                                DragMode::Translate => {
+                                    let dx = cursor_position.x - drag_state.start_cursor_pos.x;
+                                    let dy = cursor_position.y - drag_state.start_cursor_pos.y;
+                                    let translation = Affine::translate((dx as f64, dy as f64));
+                                    translation * drag_state.start_transform
+                                }
+                                DragMode::Rotate => {
+                                    let center = drag_state.import_center;
+                                    let start_angle = (drag_state.start_cursor_pos.y - center.y)
+                                        .atan2(drag_state.start_cursor_pos.x - center.x);
+                                    let current_angle = (cursor_position.y - center.y)
+                                        .atan2(cursor_position.x - center.x);
+                                    let delta_angle = current_angle - start_angle;
+                                    
+                                    let rotation = Affine::rotate_about(
+                                        delta_angle as f64,
+                                        kurbo::Point::new(center.x as f64, center.y as f64),
+                                    );
+                                    rotation * drag_state.start_transform
+                                }
+                            };
+
+                            if let Err(e) = project.data.update_import_transform(import_id, new_transform) {
+                                eprintln!("Failed to update transform: {}", e);
+                            }
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::CanvasDragEnd => {
+                self.drag_state = None;
+                if let Some(project) = self.project.as_mut() {
+                    if let Err(e) = project.save() {
+                        eprintln!("Failed to save project after drag: {}", e);
+                    }
+                    // Re-sync things if needed, though transform update should be enough
+                    self.sync_selected_curves();
+                }
                 Task::none()
             }
         }

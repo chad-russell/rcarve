@@ -1,6 +1,7 @@
 use crate::geometry::{CurveId, RegionId, ShapeId, ShapeRegistry};
 use crate::{Operation, OperationTarget, Toolpath};
 use anyhow::{anyhow, Context, Result};
+use kurbo::Affine;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -218,6 +219,7 @@ impl Project {
             curve_ids,
             region_ids,
             imported_at_epoch_ms: current_epoch_ms(),
+            transform: Affine::IDENTITY,
         };
         self.imported_svgs.push(import);
     }
@@ -244,9 +246,73 @@ impl Project {
             curve_ids: batch.curve_ids.clone(),
             region_ids: batch.region_ids.clone(),
             imported_at_epoch_ms: current_epoch_ms(),
+            transform: Affine::IDENTITY,
         };
         self.imported_svgs.push(import.clone());
         Ok(import)
+    }
+
+    /// Update the transform of an imported SVG.
+    /// This will automatically invalidate any operations that use curves from this import.
+    pub fn update_import_transform(&mut self, id: Ulid, transform: Affine) -> Result<()> {
+        // First, find the import and get its curve IDs
+        let curve_ids = self
+            .imported_svgs
+            .iter()
+            .find(|i| i.id == id)
+            .map(|import| import.curve_ids.clone())
+            .ok_or_else(|| anyhow!("Import not found"))?;
+        
+        // Update the transform
+        if let Some(import) = self.imported_svgs.iter_mut().find(|i| i.id == id) {
+            import.transform = transform;
+        }
+        
+        self.touch_updated_timestamp();
+        
+        // Find and invalidate all operations using curves from this import
+        let affected_ops = self.operations_using_import_curves(&curve_ids);
+        for op_index in affected_ops {
+            self.mark_operation_dirty(op_index);
+        }
+        
+        Ok(())
+    }
+
+    /// Find all operation indices that reference any of the given curve IDs.
+    fn operations_using_import_curves(&self, curve_ids: &[CurveId]) -> Vec<usize> {
+        self.operations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, operation)| {
+                let has_curve = match operation {
+                    Operation::Profile { targets, .. } => {
+                        Self::operation_target_uses_curves(targets, curve_ids)
+                    }
+                    Operation::Pocket { target, .. } => {
+                        Self::operation_target_uses_curves(target, curve_ids)
+                    }
+                    Operation::VCarve { targets, .. } => {
+                        Self::operation_target_uses_curves(targets, curve_ids)
+                    }
+                };
+                if has_curve {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Check if an operation target references any of the given curve IDs.
+    fn operation_target_uses_curves(target: &OperationTarget, curve_ids: &[CurveId]) -> bool {
+        match target {
+            OperationTarget::Curves(target_curves) => {
+                target_curves.iter().any(|c| curve_ids.contains(c))
+            }
+            OperationTarget::Region(_) => false,
+        }
     }
 }
 
@@ -333,6 +399,10 @@ pub enum ToolpathPassKind {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_affine() -> Affine {
+    Affine::IDENTITY
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -463,6 +533,8 @@ pub struct SvgImport {
     pub curve_ids: Vec<CurveId>,
     pub region_ids: Vec<RegionId>,
     pub imported_at_epoch_ms: u64,
+    #[serde(default = "default_affine")]
+    pub transform: Affine,
 }
 
 impl SvgImport {
@@ -482,6 +554,7 @@ impl SvgImport {
             curve_ids,
             region_ids,
             imported_at_epoch_ms,
+            transform: Affine::IDENTITY,
         }
     }
 }
