@@ -97,6 +97,7 @@ pub enum Message {
         mode: DragMode,
         cursor_position: iced::Point,
         import_center: iced::Point,
+        anchor_point: Option<iced::Point>,
     },
     CanvasDragUpdate(iced::Point),
     CanvasDragEnd,
@@ -106,6 +107,7 @@ pub enum Message {
 pub enum DragMode {
     Translate,
     Rotate,
+    Scale,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +116,7 @@ pub struct DragState {
     pub start_transform: Affine,
     pub import_center: iced::Point,
     pub mode: DragMode,
+    pub anchor_point: Option<iced::Point>, // For scaling - the opposite corner that stays fixed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -671,6 +674,7 @@ impl App {
                 mode,
                 cursor_position,
                 import_center,
+                anchor_point,
             } => {
                 if let Some(project) = &self.project {
                     if let Some(import_id) = self.selected_import {
@@ -685,6 +689,7 @@ impl App {
                                 start_transform: import.transform,
                                 import_center,
                                 mode,
+                                anchor_point,
                             });
                         }
                     }
@@ -715,6 +720,34 @@ impl App {
                                         kurbo::Point::new(center.x as f64, center.y as f64),
                                     );
                                     rotation * drag_state.start_transform
+                                }
+                                DragMode::Scale => {
+                                    if let Some(anchor) = drag_state.anchor_point {
+                                        // Calculate distances from cursor to anchor point
+                                        let dx_current = cursor_position.x - anchor.x;
+                                        let dy_current = cursor_position.y - anchor.y;
+                                        let current_distance = (dx_current * dx_current + dy_current * dy_current).sqrt();
+                                        
+                                        let dx_start = drag_state.start_cursor_pos.x - anchor.x;
+                                        let dy_start = drag_state.start_cursor_pos.y - anchor.y;
+                                        let start_distance = (dx_start * dx_start + dy_start * dy_start).sqrt();
+                                        
+                                        // Calculate scale factor (uniform scaling)
+                                        let scale_factor = if start_distance > 0.0 {
+                                            (current_distance / start_distance) as f64
+                                        } else {
+                                            1.0
+                                        };
+                                        
+                                        // Apply scale around the anchor point
+                                        let anchor_kurbo = kurbo::Point::new(anchor.x as f64, anchor.y as f64);
+                                        let scale_transform = Affine::translate(anchor_kurbo.to_vec2())
+                                            * Affine::scale(scale_factor)
+                                            * Affine::translate(-anchor_kurbo.to_vec2());
+                                        scale_transform * drag_state.start_transform
+                                    } else {
+                                        drag_state.start_transform
+                                    }
                                 }
                             };
 

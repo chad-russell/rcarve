@@ -56,6 +56,42 @@ impl Program<Message> for WorkspaceCanvas {
                         // Check handles first (if any selected)
                         for import in &scene.imports {
                             if import.selected {
+                                // Check corner handles for scaling (before rotation handle)
+                                let hit_radius = 12.0 / scale;
+                                
+                                // Define the 4 corners in world coordinates
+                                let corners = [
+                                    (Point::new(import.bounds.x, import.bounds.y + import.bounds.height), 
+                                     Point::new(import.bounds.x + import.bounds.width, import.bounds.y)), // Top-left, anchor: bottom-right
+                                    (Point::new(import.bounds.x + import.bounds.width, import.bounds.y + import.bounds.height), 
+                                     Point::new(import.bounds.x, import.bounds.y)), // Top-right, anchor: bottom-left
+                                    (Point::new(import.bounds.x, import.bounds.y), 
+                                     Point::new(import.bounds.x + import.bounds.width, import.bounds.y + import.bounds.height)), // Bottom-left, anchor: top-right
+                                    (Point::new(import.bounds.x + import.bounds.width, import.bounds.y), 
+                                     Point::new(import.bounds.x, import.bounds.y + import.bounds.height)), // Bottom-right, anchor: top-left
+                                ];
+                                
+                                for (corner_pos, anchor_pos) in &corners {
+                                    let dist = world_cursor.distance(*corner_pos);
+                                    if dist < hit_radius {
+                                        let center = Point::new(
+                                            import.bounds.x + import.bounds.width / 2.0,
+                                            import.bounds.y + import.bounds.height / 2.0,
+                                        );
+                                        
+                                        return (
+                                            event::Status::Captured,
+                                            Some(Message::CanvasDragStart {
+                                                mode: DragMode::Scale,
+                                                cursor_position: world_cursor,
+                                                import_center: center,
+                                                anchor_point: Some(*anchor_pos),
+                                            }),
+                                        );
+                                    }
+                                }
+                                
+                                // Check rotation handle
                                 let handle_world_pos = calculate_handle_position(&import.bounds, scale);
 
                                 // Hit radius: visual radius (6px) + padding (6px) = 12px total
@@ -74,6 +110,7 @@ impl Program<Message> for WorkspaceCanvas {
                                             mode: DragMode::Rotate,
                                             cursor_position: world_cursor,
                                             import_center: center,
+                                            anchor_point: None,
                                         }),
                                     );
                                 }
@@ -107,6 +144,7 @@ impl Program<Message> for WorkspaceCanvas {
                                             mode: DragMode::Translate,
                                             cursor_position: world_cursor,
                                             import_center: center,
+                                            anchor_point: None,
                                         }
                                     } else {
                                         Message::SelectImport(import.id)
@@ -569,7 +607,32 @@ fn draw_scene(
                     .with_width(1.0),
             );
 
-            // Draw handle
+            // Draw corner handles for scaling
+            let corner_positions = [
+                Point::new(import.bounds.x, import.bounds.y + import.bounds.height), // Top-left
+                Point::new(import.bounds.x + import.bounds.width, import.bounds.y + import.bounds.height), // Top-right
+                Point::new(import.bounds.x, import.bounds.y), // Bottom-left
+                Point::new(import.bounds.x + import.bounds.width, import.bounds.y), // Bottom-right
+            ];
+            
+            for corner_world in &corner_positions {
+                let corner_screen = world_to_screen(*corner_world, &scene.bounds, scale, offset);
+                
+                // Draw square handle (8x8 pixels)
+                let handle_size = iced::Size::new(8.0, 8.0);
+                let handle_pos = Point::new(corner_screen.x - 4.0, corner_screen.y - 4.0);
+                
+                let handle_rect = canvas::Path::rectangle(handle_pos, handle_size);
+                frame.fill(&handle_rect, Color::WHITE);
+                frame.stroke(
+                    &handle_rect,
+                    canvas::Stroke::default()
+                        .with_color(Color::from_rgb8(0x00, 0x7A, 0xFF))
+                        .with_width(1.5),
+                );
+            }
+            
+            // Draw rotation handle
             let handle_world_pos = calculate_handle_position(&import.bounds, scale);
             let handle_screen_pos = world_to_screen(handle_world_pos, &scene.bounds, scale, offset);
             
