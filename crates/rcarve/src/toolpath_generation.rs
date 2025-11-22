@@ -1,6 +1,7 @@
 use crate::geometry::offset::offset_polygon;
 use crate::geometry::{CurveId, Region};
 use crate::types::{Tool, ToolType};
+use crate::vcarve::PathType;
 use crate::{
     generate_pocket_toolpath, generate_profile_toolpath, generate_vcarve_toolpath, CarvePolygon,
     Operation, OperationTarget, Project, ToolLibrary, Toolpath, ToolpathArtifact, ToolpathPass,
@@ -204,8 +205,28 @@ fn generate_toolpath_for_operation(
                 ));
             }
 
-            let finish_toolpath = generate_vcarve_toolpath(&carve_polygons, tool, *target_depth)
+            let vcarve_paths = generate_vcarve_toolpath(&carve_polygons, tool, *target_depth)
                 .with_context(|| format!("V-carve operation {operation_index} failed"))?;
+
+            // Convert PathType to Toolpath
+            let mut finish_paths_3d = Vec::new();
+            for pt in vcarve_paths {
+                match pt {
+                    PathType::Crease { start, end } => {
+                        finish_paths_3d.push(vec![
+                            (start[0], start[1], start[2]),
+                            (end[0], end[1], end[2]),
+                        ]);
+                    }
+                    PathType::PocketBoundary { path, depth } => {
+                        let z = -depth.abs();
+                        let path_3d = path.into_iter().map(|p| (p[0], p[1], z)).collect();
+                        finish_paths_3d.push(path_3d);
+                    }
+                }
+            }
+            let finish_toolpath = Toolpath { paths: finish_paths_3d };
+
             passes.push(ToolpathPass::new(
                 *tool_index,
                 ToolpathPassKind::Finish,

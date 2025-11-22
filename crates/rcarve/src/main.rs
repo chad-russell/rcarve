@@ -167,7 +167,26 @@ fn demo_vcarve() {
     }];
 
     match generate_vcarve_toolpath(&polygons, &tool, Some(5.0)) {
-        Ok(toolpath) => {
+        Ok(path_types) => {
+            // Convert PathType to Toolpath
+            let mut paths_3d = Vec::new();
+            for pt in path_types {
+                match pt {
+                    PathType::Crease { start, end } => {
+                        paths_3d.push(vec![
+                            (start[0], start[1], start[2]),
+                            (end[0], end[1], end[2]),
+                        ]);
+                    }
+                    PathType::PocketBoundary { path, depth } => {
+                        let z = -depth.abs();
+                        let path_3d = path.into_iter().map(|p| (p[0], p[1], z)).collect();
+                        paths_3d.push(path_3d);
+                    }
+                }
+            }
+            let toolpath = Toolpath { paths: paths_3d };
+            
             let gcode = post_process_grbl(&toolpath);
             println!("Generated {} path(s) for V-carve", toolpath.paths.len());
             println!("\nG-code:\n");

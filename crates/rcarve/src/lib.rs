@@ -16,7 +16,7 @@ pub use project::*;
 pub use tool_library::*;
 pub use toolpath_generation::*;
 pub use types::*;
-pub use vcarve::{generate_vcarve_toolpath, CarvePolygon};
+pub use vcarve::{generate_vcarve_toolpath, CarvePolygon, PathType};
 
 /// High-level function: geometry → toolpath → G-code
 ///
