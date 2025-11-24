@@ -13,6 +13,7 @@ const CURVE_FLATTEN_TOLERANCE: f64 = 0.5;
 pub struct WorkspaceCanvas {
     pub scene: Option<CanvasScene>,
     pub camera: CameraState,
+    pub overlay_only: bool,
 }
 
 impl Program<Message> for WorkspaceCanvas {
@@ -219,12 +220,14 @@ impl Program<Message> for WorkspaceCanvas {
         let background = palette.background.weak.color;
         let accent = palette.primary.strong.color;
 
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), background);
-        draw_crosshair(&mut frame, bounds.size(), accent);
+        if !self.overlay_only {
+            frame.fill_rectangle(Point::ORIGIN, bounds.size(), background);
+            draw_crosshair(&mut frame, bounds.size(), accent);
+        }
 
         if let Some(scene) = &self.scene {
-            draw_scene(&mut frame, scene, bounds.size(), &self.camera);
-        } else {
+            draw_scene(&mut frame, scene, bounds.size(), &self.camera, self.overlay_only);
+        } else if !self.overlay_only {
             draw_placeholder_circle(&mut frame, bounds.size(), accent);
         }
 
@@ -277,8 +280,8 @@ pub struct CanvasDebugPolygon {
 
 #[derive(Debug, Clone)]
 pub struct Bounds {
-    min: Point,
-    max: Point,
+    pub min: Point,
+    pub max: Point,
 }
 
 impl Bounds {
@@ -296,11 +299,11 @@ impl Bounds {
         self.max.y = self.max.y.max(point.y);
     }
 
-    fn width(&self) -> f32 {
+    pub fn width(&self) -> f32 {
         (self.max.x - self.min.x).max(1.0)
     }
 
-    fn height(&self) -> f32 {
+    pub fn height(&self) -> f32 {
         (self.max.y - self.min.y).max(1.0)
     }
 }
@@ -507,223 +510,87 @@ fn draw_scene(
     scene: &CanvasScene,
     size: iced::Size,
     camera: &CameraState,
+    overlay_only: bool,
 ) {
-    let width = scene.bounds.width();
-    let height = scene.bounds.height();
+    // This function now only draws UI overlays (selection handles, gizmos)
+    // The actual scene geometry (imports, toolpaths, stock) is rendered by the WGPU shader
+    
+    if overlay_only {
+        let (scale, offset) = calculate_transform(size, &scene.bounds, camera);
+        
+        // Draw selection handles and manipulation gizmos
+        for import in &scene.imports {
+            if import.selected {
+                // Draw bounding box
+                let top_left_world = Point::new(
+                    import.bounds.x,
+                    import.bounds.y + import.bounds.height,
+                );
 
-    // Base scale to fit scene in view (only used if zoom is at default 1.0)
-    let base_scale = (size.width / width).min(size.height / height) * 0.9;
+                let screen_min = world_to_screen(top_left_world, &scene.bounds, scale, offset);
+                let screen_size =
+                    iced::Size::new(import.bounds.width * scale, import.bounds.height * scale);
 
-    // Apply camera zoom
-    let scale = base_scale * camera.zoom;
-
-    // Base offset to center scene (only used if pan is at default 0,0)
-    let base_offset = Point::new(
-        (size.width - width * base_scale) / 2.0,
-        (size.height - height * base_scale) / 2.0,
-    );
-
-    // Apply camera pan
-    let offset = Point::new(base_offset.x + camera.pan_x, base_offset.y + camera.pan_y);
-
-    // Draw Stock
-    if let Some(stock) = &scene.stock {
-        // Stock is stored in CNC coordinates (bottom-left origin usually).
-        // We need to calculate the top-left corner in screen coordinates.
-        // CNC Top-Left is (x, y + h)
-        let cnc_top_left = Point::new(stock.rect.x, stock.rect.y + stock.rect.height);
-
-        let normalized_x = cnc_top_left.x - scene.bounds.min.x;
-        let normalized_y = scene.bounds.max.y - cnc_top_left.y;
-
-        let screen_pos = Point::new(
-            normalized_x * scale + offset.x,
-            normalized_y * scale + offset.y,
-        );
-
-        let screen_size = iced::Size::new(stock.rect.width * scale, stock.rect.height * scale);
-
-        let stock_color = Color::from_rgb8(240, 240, 240); // Light gray
-        frame.fill_rectangle(screen_pos, screen_size, stock_color);
-
-        // Optional: Draw border
-        let border_path = canvas::Path::rectangle(screen_pos, screen_size);
-        frame.stroke(
-            &border_path,
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb8(200, 200, 200))
-                .with_width(1.0),
-        );
-    }
-
-    for import in &scene.imports {
-        let stroke = canvas::Stroke::default()
-            .with_color(if import.selected {
-                Color::from_rgb8(0xFD, 0x7E, 0x14)
-            } else {
-                Color::from_rgb8(0x55, 0x55, 0x55)
-            })
-            .with_width(if import.selected { 2.5 } else { 1.0 });
-
-        for polyline in &import.polylines {
-            if polyline.len() < 2 {
-                continue;
-            }
-            let path = canvas::Path::new(|builder| {
-                for (index, point) in polyline.iter().enumerate() {
-                    let normalized_x = point.x - scene.bounds.min.x;
-                    let normalized_y = scene.bounds.max.y - point.y;
-                    let transformed = Point::new(
-                        normalized_x * scale + offset.x,
-                        normalized_y * scale + offset.y,
-                    );
-                    if index == 0 {
-                        builder.move_to(transformed);
-                    } else {
-                        builder.line_to(transformed);
-                    }
-                }
-            });
-            frame.stroke(&path, stroke);
-        }
-
-        if import.selected {
-            // Draw bounding box
-            // In CNC coords (bottom-left origin), the top-left corner is at (x, y+height)
-            let top_left_world = Point::new(
-                import.bounds.x,
-                import.bounds.y + import.bounds.height,
-            );
-
-            let screen_min = world_to_screen(top_left_world, &scene.bounds, scale, offset);
-            let screen_size =
-                iced::Size::new(import.bounds.width * scale, import.bounds.height * scale);
-
-            let bounds_path = canvas::Path::rectangle(screen_min, screen_size);
-            frame.stroke(
-                &bounds_path,
-                canvas::Stroke::default()
-                    .with_color(Color::from_rgb8(0xFD, 0x7E, 0x14))
-                    .with_width(1.0),
-            );
-
-            // Draw corner handles for scaling
-            let corner_positions = [
-                Point::new(import.bounds.x, import.bounds.y + import.bounds.height), // Top-left
-                Point::new(import.bounds.x + import.bounds.width, import.bounds.y + import.bounds.height), // Top-right
-                Point::new(import.bounds.x, import.bounds.y), // Bottom-left
-                Point::new(import.bounds.x + import.bounds.width, import.bounds.y), // Bottom-right
-            ];
-            
-            for corner_world in &corner_positions {
-                let corner_screen = world_to_screen(*corner_world, &scene.bounds, scale, offset);
-                
-                // Draw square handle (8x8 pixels)
-                let handle_size = iced::Size::new(8.0, 8.0);
-                let handle_pos = Point::new(corner_screen.x - 4.0, corner_screen.y - 4.0);
-                
-                let handle_rect = canvas::Path::rectangle(handle_pos, handle_size);
-                frame.fill(&handle_rect, Color::WHITE);
+                let bounds_path = canvas::Path::rectangle(screen_min, screen_size);
                 frame.stroke(
-                    &handle_rect,
+                    &bounds_path,
+                    canvas::Stroke::default()
+                        .with_color(Color::from_rgb8(0xFD, 0x7E, 0x14))
+                        .with_width(1.0),
+                );
+
+                // Draw corner handles for scaling
+                let corner_positions = [
+                    Point::new(import.bounds.x, import.bounds.y + import.bounds.height), // Top-left
+                    Point::new(import.bounds.x + import.bounds.width, import.bounds.y + import.bounds.height), // Top-right
+                    Point::new(import.bounds.x, import.bounds.y), // Bottom-left
+                    Point::new(import.bounds.x + import.bounds.width, import.bounds.y), // Bottom-right
+                ];
+                
+                for corner_world in &corner_positions {
+                    let corner_screen = world_to_screen(*corner_world, &scene.bounds, scale, offset);
+                    
+                    // Draw square handle (8x8 pixels)
+                    let handle_size = iced::Size::new(8.0, 8.0);
+                    let handle_pos = Point::new(corner_screen.x - 4.0, corner_screen.y - 4.0);
+                    
+                    let handle_rect = canvas::Path::rectangle(handle_pos, handle_size);
+                    frame.fill(&handle_rect, Color::WHITE);
+                    frame.stroke(
+                        &handle_rect,
+                        canvas::Stroke::default()
+                            .with_color(Color::from_rgb8(0x00, 0x7A, 0xFF))
+                            .with_width(1.5),
+                    );
+                }
+                
+                // Draw rotation handle
+                let handle_world_pos = calculate_handle_position(&import.bounds, scale);
+                let handle_screen_pos = world_to_screen(handle_world_pos, &scene.bounds, scale, offset);
+                
+                // Top center of bounding box
+                let top_center_screen =
+                    Point::new(screen_min.x + screen_size.width / 2.0, screen_min.y);
+
+                // Line connecting handle to bounding box
+                let connector = canvas::Path::line(top_center_screen, handle_screen_pos);
+                frame.stroke(
+                    &connector,
                     canvas::Stroke::default()
                         .with_color(Color::from_rgb8(0x00, 0x7A, 0xFF))
                         .with_width(1.5),
                 );
+
+                // Handle circle
+                let handle_circle = canvas::Path::circle(handle_screen_pos, 6.0);
+                frame.fill(&handle_circle, Color::from_rgb8(0x00, 0x7A, 0xFF));
+                frame.stroke(
+                    &handle_circle,
+                    canvas::Stroke::default()
+                        .with_color(Color::WHITE)
+                        .with_width(1.5),
+                );
             }
-            
-            // Draw rotation handle
-            let handle_world_pos = calculate_handle_position(&import.bounds, scale);
-            let handle_screen_pos = world_to_screen(handle_world_pos, &scene.bounds, scale, offset);
-            
-            // Top center of bounding box
-            let top_center_screen =
-                Point::new(screen_min.x + screen_size.width / 2.0, screen_min.y);
-
-            // Line connecting handle to bounding box
-            let connector = canvas::Path::line(top_center_screen, handle_screen_pos);
-            frame.stroke(
-                &connector,
-                canvas::Stroke::default()
-                    .with_color(Color::from_rgb8(0x00, 0x7A, 0xFF))
-                    .with_width(1.5),
-            );
-
-            // Handle circle
-            let handle_circle = canvas::Path::circle(handle_screen_pos, 6.0);
-            frame.fill(&handle_circle, Color::from_rgb8(0x00, 0x7A, 0xFF));
-            frame.stroke(
-                &handle_circle,
-                canvas::Stroke::default()
-                    .with_color(Color::WHITE)
-                    .with_width(1.5),
-            );
-        }
-    }
-
-    for toolpath in &scene.toolpaths {
-        let stroke = canvas::Stroke::default()
-            .with_color(if toolpath.meta.highlighted {
-                toolpath.meta.color
-            } else {
-                Color {
-                    a: 0.7,
-                    ..toolpath.meta.color
-                }
-            })
-            .with_width(if toolpath.meta.highlighted { 2.5 } else { 1.6 });
-
-        for segment in &toolpath.segments {
-            if segment.len() < 2 {
-                continue;
-            }
-            let path = canvas::Path::new(|builder| {
-                for (idx, point) in segment.iter().enumerate() {
-                    let normalized_x = point.x - scene.bounds.min.x;
-                    let normalized_y = scene.bounds.max.y - point.y;
-                    let transformed = Point::new(
-                        normalized_x * scale + offset.x,
-                        normalized_y * scale + offset.y,
-                    );
-                    if idx == 0 {
-                        builder.move_to(transformed);
-                    } else {
-                        builder.line_to(transformed);
-                    }
-                }
-            });
-            frame.stroke(&path, stroke);
-        }
-    }
-
-    for polygon in &scene.debug_polygons {
-        let stroke = canvas::Stroke::default()
-            .with_color(Color {
-                a: 0.5,
-                ..polygon.color
-            })
-            .with_width(1.2);
-
-        for segment in &polygon.segments {
-            if segment.len() < 2 {
-                continue;
-            }
-            let path = canvas::Path::new(|builder| {
-                for (idx, point) in segment.iter().enumerate() {
-                    let normalized_x = point.x - scene.bounds.min.x;
-                    let normalized_y = scene.bounds.max.y - point.y;
-                    let transformed = Point::new(
-                        normalized_x * scale + offset.x,
-                        normalized_y * scale + offset.y,
-                    );
-                    if idx == 0 {
-                        builder.move_to(transformed);
-                    } else {
-                        builder.line_to(transformed);
-                    }
-                }
-            });
-            frame.stroke(&path, stroke);
         }
     }
 }

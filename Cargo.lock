@@ -3154,6 +3154,8 @@ dependencies = [
 name = "rcarve-iced"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "glam 0.30.9",
  "iced",
  "kurbo 0.12.0",
  "rcarve",

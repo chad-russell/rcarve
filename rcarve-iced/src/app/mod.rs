@@ -1,5 +1,5 @@
 use iced::keyboard;
-use iced::widget::{button, canvas, center, column, container, pick_list, row, text};
+use iced::widget::{button, canvas, center, column, container, pick_list, row, text, shader, stack};
 use iced::{Alignment, Element, Length, Subscription, Task};
 use kurbo::Affine;
 use rcarve::ids::CurveId;
@@ -13,6 +13,7 @@ use std::{
 use ulid::Ulid;
 
 mod canvas_view;
+mod canvas_view_3d;
 mod imports_panel;
 mod operation_form;
 mod operations_panel;
@@ -23,6 +24,7 @@ mod tools_panel;
 mod util;
 
 use canvas_view::{WorkspaceCanvas, build_scene};
+use canvas_view_3d::WorkspaceView3D;
 use imports_panel::imports_view;
 use operation_form::{OperationForm, OperationKindForm};
 use operations_panel::operations_view;
@@ -860,7 +862,9 @@ impl App {
                 row![
                     text(project.name()).size(26),
                     button("<<").on_press(Message::TogglePanel),
-                ],
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
                 text(project.path.display().to_string()).size(14),
                 tab_bar,
                 tab_content,
@@ -874,15 +878,29 @@ impl App {
             .width(Length::Fixed(panel_width))
             .height(Length::Fill);
 
-        let canvas_program = WorkspaceCanvas {
-            scene: self.canvas_scene(),
+        let canvas_scene = self.canvas_scene();
+        
+        // Always use the hybrid 3D approach: WGPU shader for geometry + Canvas overlay for UI
+        let shader_view = shader(WorkspaceView3D {
+            scene: canvas_scene.clone(),
             camera: self.camera.clone(),
+        })
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+        let overlay = WorkspaceCanvas {
+            scene: canvas_scene,
+            camera: self.camera.clone(),
+            overlay_only: true,
         };
 
         let canvas_area = container(
-            canvas(canvas_program)
-                .width(Length::Fill)
-                .height(Length::Fill),
+            stack![
+                shader_view,
+                canvas(overlay).width(Length::Fill).height(Length::Fill)
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill),
         )
         .padding(24)
         .width(Length::Fill)
