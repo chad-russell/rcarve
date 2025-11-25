@@ -14,6 +14,7 @@ use ulid::Ulid;
 
 mod canvas_view;
 mod canvas_view_3d;
+mod canvas_view_wgpu;
 mod imports_panel;
 mod operation_form;
 mod operations_panel;
@@ -24,7 +25,8 @@ mod tools_panel;
 mod util;
 
 use canvas_view::{WorkspaceCanvas, build_scene};
-use canvas_view_3d::WorkspaceView3D;
+use canvas_view_3d::Workspace3DView;
+use canvas_view_wgpu::WorkspaceView3D;
 use imports_panel::imports_view;
 use operation_form::{OperationForm, OperationKindForm};
 use operations_panel::operations_view;
@@ -103,6 +105,15 @@ pub enum Message {
     },
     CanvasDragUpdate(iced::Point),
     CanvasDragEnd,
+    // 3D View messages
+    Canvas3DOrbitStart(iced::Point),
+    Canvas3DOrbitUpdate(iced::Point),
+    Canvas3DOrbitEnd,
+    Canvas3DPanStart(iced::Point),
+    Canvas3DPanUpdate(iced::Point),
+    Canvas3DPanEnd,
+    Canvas3DZoom(f32),
+    Toggle3DStockMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +138,7 @@ pub enum SidebarTab {
     Imports,
     Tools,
     Operations,
+    View3D,
 }
 
 impl Default for SidebarTab {
@@ -147,6 +159,7 @@ pub struct App {
     selected_import: Option<Ulid>,
     selected_curves: Vec<CurveId>,
     camera: CameraState,
+    camera_3d: Camera3DState,
     current_tab: SidebarTab,
     tool_library: ToolLibrary,
     show_tool_modal: bool,
@@ -160,9 +173,11 @@ pub struct App {
     visible_toolpaths: HashSet<usize>,
     highlighted_toolpath: Option<usize>,
     toolpath_segments: HashMap<usize, Vec<Vec<(f32, f32)>>>,
+    toolpath_segments_3d: HashMap<usize, Vec<Vec<(f32, f32, f32)>>>,
     show_debug_polygons: bool,
     debug_polygons: HashMap<usize, Vec<Vec<(f32, f32)>>>,
     drag_state: Option<DragState>,
+    show_3d_stock_wireframe: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +196,84 @@ impl Default for CameraState {
             pan_y: 0.0,
             pan_start: None,
         }
+    }
+}
+
+/// 3D camera state with orbit controls
+#[derive(Debug, Clone)]
+pub struct Camera3DState {
+    /// Horizontal rotation angle in radians
+    pub azimuth: f32,
+    /// Vertical rotation angle in radians (clamped to avoid gimbal lock)
+    pub elevation: f32,
+    /// Distance from the camera to the orbit center
+    pub distance: f32,
+    /// Pan offset in world space
+    pub pan_x: f32,
+    pub pan_y: f32,
+    /// Scene center for orbit (calculated from stock)
+    pub center: glam::Vec3,
+    /// For tracking drag state
+    pub orbit_start: Option<iced::Point>,
+    pub pan_start: Option<iced::Point>,
+}
+
+impl Default for Camera3DState {
+    fn default() -> Self {
+        Self {
+            azimuth: std::f32::consts::PI * 0.75,  // 135 degrees - isometric-ish view
+            elevation: std::f32::consts::PI * 0.25, // 45 degrees
+            distance: 300.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            center: glam::Vec3::ZERO,
+            orbit_start: None,
+            pan_start: None,
+        }
+    }
+}
+
+impl Camera3DState {
+    /// Calculate camera position from spherical coordinates
+    pub fn camera_position(&self) -> glam::Vec3 {
+        let x = self.distance * self.elevation.cos() * self.azimuth.cos();
+        let y = self.distance * self.elevation.cos() * self.azimuth.sin();
+        let z = self.distance * self.elevation.sin();
+        self.center + glam::Vec3::new(x, y, z)
+    }
+
+    /// Generate view matrix (look-at)
+    pub fn view_matrix(&self) -> glam::Mat4 {
+        let eye = self.camera_position();
+        let target = self.center + glam::Vec3::new(self.pan_x, self.pan_y, 0.0);
+        let up = glam::Vec3::Z; // Z-up for CNC coordinate system
+        glam::Mat4::look_at_rh(eye, target, up)
+    }
+
+    /// Generate perspective projection matrix
+    pub fn projection_matrix(&self, aspect_ratio: f32) -> glam::Mat4 {
+        let fov = std::f32::consts::PI / 4.0; // 45 degrees
+        let near = 0.1;
+        let far = 10000.0;
+        glam::Mat4::perspective_rh(fov, aspect_ratio, near, far)
+    }
+
+    /// Combined view-projection matrix
+    pub fn view_projection_matrix(&self, aspect_ratio: f32) -> glam::Mat4 {
+        self.projection_matrix(aspect_ratio) * self.view_matrix()
+    }
+
+    /// Set center based on stock dimensions
+    pub fn set_center_from_stock(&mut self, stock: &StockSpec) {
+        let origin = stock.origin.unwrap_or((0.0, 0.0, 0.0));
+        self.center = glam::Vec3::new(
+            (origin.0 + stock.width / 2.0) as f32,
+            (origin.1 + stock.height / 2.0) as f32,
+            -(stock.thickness / 2.0) as f32, // Center in Z (negative is down)
+        );
+        // Set initial distance based on stock size
+        let max_dim = stock.width.max(stock.height).max(stock.thickness) as f32;
+        self.distance = max_dim * 2.5;
     }
 }
 
@@ -772,6 +865,61 @@ impl App {
                 }
                 Task::none()
             }
+            // 3D View camera controls
+            Message::Canvas3DOrbitStart(point) => {
+                self.camera_3d.orbit_start = Some(point);
+                Task::none()
+            }
+            Message::Canvas3DOrbitUpdate(point) => {
+                if let Some(start) = self.camera_3d.orbit_start {
+                    let dx = point.x - start.x;
+                    let dy = point.y - start.y;
+                    // Sensitivity factor
+                    let sensitivity = 0.005;
+                    self.camera_3d.azimuth -= dx * sensitivity;
+                    self.camera_3d.elevation += dy * sensitivity;
+                    // Clamp elevation to avoid gimbal lock
+                    self.camera_3d.elevation = self.camera_3d.elevation
+                        .clamp(0.1, std::f32::consts::PI - 0.1);
+                    self.camera_3d.orbit_start = Some(point);
+                }
+                Task::none()
+            }
+            Message::Canvas3DOrbitEnd => {
+                self.camera_3d.orbit_start = None;
+                Task::none()
+            }
+            Message::Canvas3DPanStart(point) => {
+                self.camera_3d.pan_start = Some(point);
+                Task::none()
+            }
+            Message::Canvas3DPanUpdate(point) => {
+                if let Some(start) = self.camera_3d.pan_start {
+                    let dx = point.x - start.x;
+                    let dy = point.y - start.y;
+                    // Pan sensitivity based on distance
+                    let sensitivity = self.camera_3d.distance * 0.002;
+                    self.camera_3d.pan_x -= dx * sensitivity;
+                    self.camera_3d.pan_y += dy * sensitivity;
+                    self.camera_3d.pan_start = Some(point);
+                }
+                Task::none()
+            }
+            Message::Canvas3DPanEnd => {
+                self.camera_3d.pan_start = None;
+                Task::none()
+            }
+            Message::Canvas3DZoom(delta) => {
+                // Zoom by adjusting distance
+                let zoom_factor = if delta > 0.0 { 0.9 } else { 1.1 };
+                self.camera_3d.distance = (self.camera_3d.distance * zoom_factor)
+                    .clamp(10.0, 5000.0);
+                Task::none()
+            }
+            Message::Toggle3DStockMode => {
+                self.show_3d_stock_wireframe = !self.show_3d_stock_wireframe;
+                Task::none()
+            }
         }
     }
 
@@ -783,10 +931,13 @@ impl App {
             Ok(project) => {
                 self.stock_form = StockForm::from_stock(project.stock());
                 self.selected_import = project.imports.first().map(|import| import.id);
+                // Reset cameras to default view when loading new project
+                self.camera = CameraState::default();
+                self.camera_3d = Camera3DState::default();
+                // Initialize 3D camera center from stock
+                self.camera_3d.set_center_from_stock(project.stock());
                 self.project = Some(project);
                 self.show_stock_modal = false;
-                // Reset camera to default view when loading new project
-                self.camera = CameraState::default();
                 self.sync_selected_curves();
                 self.sync_visible_toolpaths();
                 self.sync_debug_polygons();
@@ -828,18 +979,20 @@ impl App {
         };
 
         let panel_content = if self.panel_collapsed {
-            column![button(">>").on_press(Message::TogglePanel),]
+            column![button("▶").on_press(Message::TogglePanel),]
                 .align_x(Alignment::Center)
                 .spacing(12)
                 .padding(16)
         } else {
             let tab_bar = row![
-                tab_button("Stock", SidebarTab::Stock, self.current_tab),
-                tab_button("Imports", SidebarTab::Imports, self.current_tab),
-                tab_button("Tools", SidebarTab::Tools, self.current_tab),
-                tab_button("Operations", SidebarTab::Operations, self.current_tab),
+                tab_pill("Stock", SidebarTab::Stock, self.current_tab),
+                tab_pill("Import", SidebarTab::Imports, self.current_tab),
+                tab_pill("Tools", SidebarTab::Tools, self.current_tab),
+                tab_pill("Ops", SidebarTab::Operations, self.current_tab),
+                tab_pill("3D", SidebarTab::View3D, self.current_tab),
             ]
-            .spacing(8);
+            .spacing(4)
+            .wrap();
 
             let operation_entries = project.data.operations_with_status();
 
@@ -856,21 +1009,27 @@ impl App {
                     self.generating_toolpaths,
                     self.show_debug_polygons,
                 ),
+                SidebarTab::View3D => view_3d_tab_view(self.show_3d_stock_wireframe),
             };
 
-            column![
-                row![
-                    text(project.name()).size(26),
-                    button("<<").on_press(Message::TogglePanel),
+            // Header with project name and collapse button
+            let header = row![
+                column![
+                    text(project.name()).size(20),
                 ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-                text(project.path.display().to_string()).size(14),
+                .width(Length::Fill),
+                button("◀").on_press(Message::TogglePanel),
+            ]
+            .align_y(Alignment::Center);
+
+            column![
+                header,
                 tab_bar,
+                iced::widget::horizontal_rule(1),
                 tab_content,
             ]
-            .spacing(16)
-            .padding(24)
+            .spacing(12)
+            .padding(16)
             .width(Length::Fill)
         };
 
@@ -878,33 +1037,53 @@ impl App {
             .width(Length::Fixed(panel_width))
             .height(Length::Fill);
 
-        let canvas_scene = self.canvas_scene();
-        
-        // Always use the hybrid 3D approach: WGPU shader for geometry + Canvas overlay for UI
-        let shader_view = shader(WorkspaceView3D {
-            scene: canvas_scene.clone(),
-            camera: self.camera.clone(),
-        })
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-        let overlay = WorkspaceCanvas {
-            scene: canvas_scene,
-            camera: self.camera.clone(),
-            overlay_only: true,
-        };
-
-        let canvas_area = container(
-            stack![
-                shader_view,
-                canvas(overlay).width(Length::Fill).height(Length::Fill)
-            ]
+        // Choose between 2D and 3D view based on current tab
+        let canvas_area: Element<'_, Message> = if self.current_tab == SidebarTab::View3D {
+            // 3D View
+            let scene_3d = self.build_scene_3d();
+            let shader_3d = shader(Workspace3DView {
+                scene: scene_3d,
+                camera: self.camera_3d.clone(),
+                wireframe_mode: self.show_3d_stock_wireframe,
+            })
             .width(Length::Fill)
-            .height(Length::Fill),
-        )
-        .padding(24)
-        .width(Length::Fill)
-        .height(Length::Fill);
+            .height(Length::Fill);
+
+            container(shader_3d)
+                .padding(24)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            // 2D View (hybrid approach: WGPU shader for geometry + Canvas overlay for UI)
+            let canvas_scene = self.canvas_scene();
+            
+            let shader_view = shader(WorkspaceView3D {
+                scene: canvas_scene.clone(),
+                camera: self.camera.clone(),
+            })
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+            let overlay = WorkspaceCanvas {
+                scene: canvas_scene,
+                camera: self.camera.clone(),
+                overlay_only: true,
+            };
+
+            container(
+                stack![
+                    shader_view,
+                    canvas(overlay).width(Length::Fill).height(Length::Fill)
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill),
+            )
+            .padding(24)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        };
 
         let mut element: Element<'_, Message> = container(
             row![panel, canvas_area]
@@ -993,6 +1172,31 @@ impl App {
         )
     }
 
+    fn build_scene_3d(&self) -> Option<canvas_view_3d::Scene3D> {
+        let project = self.project.as_ref()?;
+        
+        // Build stock
+        let stock = canvas_view_3d::Stock3D::from_stock_spec(&project.data.stock);
+        
+        // Build toolpaths
+        let mut toolpaths = Vec::new();
+        for (index, segments) in &self.toolpath_segments_3d {
+            if !self.visible_toolpaths.contains(index) {
+                continue;
+            }
+            toolpaths.push(canvas_view_3d::Toolpath3D {
+                segments: segments.clone(),
+                color: canvas_view::toolpath_color(*index),
+                highlighted: self.highlighted_toolpath == Some(*index),
+            });
+        }
+        
+        Some(canvas_view_3d::Scene3D {
+            stock: Some(stock),
+            toolpaths,
+        })
+    }
+
     fn sync_selected_curves(&mut self) {
         if let Some(project) = &self.project {
             if let Some(import_id) = self.selected_import {
@@ -1012,16 +1216,19 @@ impl App {
     fn sync_visible_toolpaths(&mut self) {
         if let Some(project) = &self.project {
             let mut valid = HashSet::new();
-            let mut new_cache = HashMap::new();
+            let mut new_cache_2d = HashMap::new();
+            let mut new_cache_3d = HashMap::new();
 
             for (index, state) in project.data.operation_states.iter().enumerate() {
                 if let Some(artifact) = &state.artifact {
                     valid.insert(index);
-                    new_cache.insert(index, Self::flatten_toolpath_segments(artifact));
+                    new_cache_2d.insert(index, Self::flatten_toolpath_segments(artifact));
+                    new_cache_3d.insert(index, Self::flatten_toolpath_segments_3d(artifact));
                 }
             }
 
-            self.toolpath_segments = new_cache;
+            self.toolpath_segments = new_cache_2d;
+            self.toolpath_segments_3d = new_cache_3d;
 
             self.visible_toolpaths.retain(|index| valid.contains(index));
 
@@ -1033,6 +1240,7 @@ impl App {
         } else {
             self.visible_toolpaths.clear();
             self.toolpath_segments.clear();
+            self.toolpath_segments_3d.clear();
         }
     }
 
@@ -1074,6 +1282,35 @@ impl App {
                 let segment: Vec<(f32, f32)> = path
                     .iter()
                     .map(|(x, y, _)| (*x as f32, *y as f32))
+                    .collect();
+                if segment.len() >= 2 {
+                    segments.push(segment);
+                }
+            }
+        };
+
+        if artifact.passes.is_empty() {
+            collect_toolpath(&artifact.toolpath);
+        } else {
+            for pass in &artifact.passes {
+                collect_toolpath(&pass.toolpath);
+            }
+        }
+
+        segments
+    }
+
+    fn flatten_toolpath_segments_3d(artifact: &ToolpathArtifact) -> Vec<Vec<(f32, f32, f32)>> {
+        let mut segments = Vec::new();
+
+        let mut collect_toolpath = |toolpath: &rcarve::Toolpath| {
+            for path in &toolpath.paths {
+                if path.len() < 2 {
+                    continue;
+                }
+                let segment: Vec<(f32, f32, f32)> = path
+                    .iter()
+                    .map(|(x, y, z)| (*x as f32, *y as f32, *z as f32))
                     .collect();
                 if segment.len() >= 2 {
                     segments.push(segment);
@@ -1370,27 +1607,87 @@ fn stock_tab_view(stock: &StockSpec) -> Element<'static, Message> {
     card.into()
 }
 
-fn tab_button<'a>(
+fn view_3d_tab_view(wireframe_mode: bool) -> Element<'static, Message> {
+    let mode_label = if wireframe_mode {
+        "Wireframe"
+    } else {
+        "Solid"
+    };
+    
+    let card = container(
+        column![
+            text("3D View").size(20),
+            text("Visualize stock and toolpaths in 3D").size(14),
+            row![
+                text("Stock rendering:").size(14),
+                button(mode_label)
+                    .padding([4, 12])
+                    .on_press(Message::Toggle3DStockMode),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            column![
+                text("Controls:").size(14),
+                text("• Left drag: Orbit camera").size(12),
+                text("• Right drag: Pan").size(12),
+                text("• Scroll: Zoom").size(12),
+            ]
+            .spacing(4),
+        ]
+        .spacing(12),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .style(container::rounded_box);
+
+    card.into()
+}
+
+fn tab_pill<'a>(
     label: &'static str,
     tab: SidebarTab,
     current: SidebarTab,
 ) -> Element<'a, Message> {
     let active = tab == current;
-    let color = if active {
-        iced::Color::from_rgb8(0xdd, 0xdd, 0xdd)
-    } else {
-        iced::Color::from_rgb8(0xaa, 0xaa, 0xaa)
-    };
+    
+    let label_text = text(label)
+        .size(13)
+        .style(move |_theme| iced::widget::text::Style {
+            color: Some(if active {
+                iced::Color::WHITE
+            } else {
+                iced::Color::from_rgb8(0x99, 0x99, 0x99)
+            }),
+            ..Default::default()
+        });
 
-    let label_text = text(label).style(move |_theme| iced::widget::text::Style {
-        color: Some(color),
-        ..Default::default()
-    });
-
-    button(label_text)
-        .padding([6, 12])
+    let btn = button(label_text)
+        .padding([4, 10])
         .on_press(Message::SelectTab(tab))
-        .into()
+        .style(move |theme, status| {
+            let base = button::primary(theme, status);
+            if active {
+                button::Style {
+                    background: Some(iced::Background::Color(
+                        iced::Color::from_rgb8(0x4a, 0x6f, 0xc9)
+                    )),
+                    text_color: iced::Color::WHITE,
+                    border: iced::Border::default().rounded(4),
+                    ..base
+                }
+            } else {
+                button::Style {
+                    background: Some(iced::Background::Color(
+                        iced::Color::from_rgb8(0x3a, 0x3a, 0x3a)
+                    )),
+                    text_color: iced::Color::from_rgb8(0x99, 0x99, 0x99),
+                    border: iced::Border::default().rounded(4),
+                    ..base
+                }
+            }
+        });
+
+    btn.into()
 }
 
 fn text_input_row<'a>(
