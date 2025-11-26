@@ -1,5 +1,5 @@
 use iced::keyboard;
-use iced::widget::{button, canvas, center, column, container, pick_list, row, text, shader, stack};
+use iced::widget::{button, canvas, center, checkbox, column, container, pick_list, row, text, shader, stack};
 use iced::{Alignment, Element, Length, Subscription, Task};
 use kurbo::Affine;
 use rcarve::ids::CurveId;
@@ -114,6 +114,15 @@ pub enum Message {
     Canvas3DPanEnd,
     Canvas3DZoom(f32),
     Toggle3DStockMode,
+    Toggle3DCurves,
+    // V-carve debug settings modal
+    OpenVCarveSettings,
+    CloseVCarveSettings,
+    ToggleCreasePaths(bool),
+    TogglePocketBoundaryPaths(bool),
+    ToggleVoronoiPrePrune(bool),
+    ToggleVoronoiPostPrune(bool),
+    TogglePrunedEdges(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +187,11 @@ pub struct App {
     debug_polygons: HashMap<usize, Vec<Vec<(f32, f32)>>>,
     drag_state: Option<DragState>,
     show_3d_stock_wireframe: bool,
+    show_3d_curves: bool,
+    // V-carve debug settings
+    show_vcarve_settings_modal: bool,
+    vcarve_debug_settings: VCarveDebugSettings,
+    vcarve_debug_edges: HashMap<usize, VCarveDebugEdges>,
 }
 
 #[derive(Debug, Clone)]
@@ -275,6 +289,48 @@ impl Camera3DState {
         let max_dim = stock.width.max(stock.height).max(stock.thickness) as f32;
         self.distance = max_dim * 2.5;
     }
+}
+
+/// Settings for V-carve debug visualization
+#[derive(Debug, Clone)]
+pub struct VCarveDebugSettings {
+    /// Show crease paths (Voronoi-derived variable depth)
+    pub show_crease_paths: bool,
+    /// Show pocket boundary paths (offset at max depth)
+    pub show_pocket_boundary_paths: bool,
+    /// Show all Voronoi edges before pruning
+    pub show_voronoi_pre_prune: bool,
+    /// Show Voronoi edges after pruning (kept edges)
+    pub show_voronoi_post_prune: bool,
+    /// Show edges that were pruned/removed
+    pub show_pruned_edges: bool,
+}
+
+impl Default for VCarveDebugSettings {
+    fn default() -> Self {
+        Self {
+            show_crease_paths: true,
+            show_pocket_boundary_paths: true,
+            show_voronoi_pre_prune: false,
+            show_voronoi_post_prune: false,
+            show_pruned_edges: false,
+        }
+    }
+}
+
+/// Cached debug edge data from V-carve generation
+#[derive(Debug, Clone, Default)]
+pub struct VCarveDebugEdges {
+    /// Pre-prune Voronoi edges [[x1,y1], [x2,y2]]
+    pub pre_prune: Vec<[[f32; 2]; 2]>,
+    /// Post-prune (kept) Voronoi edges
+    pub post_prune: Vec<[[f32; 2]; 2]>,
+    /// Pruned (removed) edges
+    pub pruned: Vec<[[f32; 2]; 2]>,
+    /// Crease path segments with depth
+    pub crease_paths: Vec<[[f32; 3]; 2]>,
+    /// Pocket boundary paths
+    pub pocket_boundary_paths: Vec<Vec<[f32; 2]>>,
 }
 
 impl App {
@@ -539,6 +595,45 @@ impl App {
                         &mut project.data,
                         &self.tool_library,
                     );
+                    
+                    // Extract V-carve debug data from reports
+                    self.vcarve_debug_edges.clear();
+                    for report in &reports {
+                        if let Some(debug) = &report.vcarve_debug {
+                            let edges = VCarveDebugEdges {
+                                pre_prune: debug
+                                    .voronoi_edges_pre_prune
+                                    .iter()
+                                    .map(|e| [[e[0][0] as f32, e[0][1] as f32], [e[1][0] as f32, e[1][1] as f32]])
+                                    .collect(),
+                                post_prune: debug
+                                    .voronoi_edges_post_prune
+                                    .iter()
+                                    .map(|e| [[e[0][0] as f32, e[0][1] as f32], [e[1][0] as f32, e[1][1] as f32]])
+                                    .collect(),
+                                pruned: debug
+                                    .pruned_edges
+                                    .iter()
+                                    .map(|e| [[e[0][0] as f32, e[0][1] as f32], [e[1][0] as f32, e[1][1] as f32]])
+                                    .collect(),
+                                crease_paths: debug
+                                    .crease_paths
+                                    .iter()
+                                    .map(|e| [
+                                        [e[0][0] as f32, e[0][1] as f32, e[0][2] as f32],
+                                        [e[1][0] as f32, e[1][1] as f32, e[1][2] as f32],
+                                    ])
+                                    .collect(),
+                                pocket_boundary_paths: debug
+                                    .pocket_boundary_paths
+                                    .iter()
+                                    .map(|path| path.iter().map(|p| [p[0] as f32, p[1] as f32]).collect())
+                                    .collect(),
+                            };
+                            self.vcarve_debug_edges.insert(report.operation_index, edges);
+                        }
+                    }
+                    
                     self.generation_reports = reports;
                     if let Err(error) = project.save() {
                         eprintln!("Failed to save project after toolpath generation: {error}");
@@ -920,6 +1015,39 @@ impl App {
                 self.show_3d_stock_wireframe = !self.show_3d_stock_wireframe;
                 Task::none()
             }
+            Message::Toggle3DCurves => {
+                self.show_3d_curves = !self.show_3d_curves;
+                Task::none()
+            }
+            // V-carve debug settings
+            Message::OpenVCarveSettings => {
+                self.show_vcarve_settings_modal = true;
+                Task::none()
+            }
+            Message::CloseVCarveSettings => {
+                self.show_vcarve_settings_modal = false;
+                Task::none()
+            }
+            Message::ToggleCreasePaths(enabled) => {
+                self.vcarve_debug_settings.show_crease_paths = enabled;
+                Task::none()
+            }
+            Message::TogglePocketBoundaryPaths(enabled) => {
+                self.vcarve_debug_settings.show_pocket_boundary_paths = enabled;
+                Task::none()
+            }
+            Message::ToggleVoronoiPrePrune(enabled) => {
+                self.vcarve_debug_settings.show_voronoi_pre_prune = enabled;
+                Task::none()
+            }
+            Message::ToggleVoronoiPostPrune(enabled) => {
+                self.vcarve_debug_settings.show_voronoi_post_prune = enabled;
+                Task::none()
+            }
+            Message::TogglePrunedEdges(enabled) => {
+                self.vcarve_debug_settings.show_pruned_edges = enabled;
+                Task::none()
+            }
         }
     }
 
@@ -1009,7 +1137,7 @@ impl App {
                     self.generating_toolpaths,
                     self.show_debug_polygons,
                 ),
-                SidebarTab::View3D => view_3d_tab_view(self.show_3d_stock_wireframe),
+                SidebarTab::View3D => view_3d_tab_view(self.show_3d_stock_wireframe, self.show_3d_curves),
             };
 
             // Header with project name and collapse button
@@ -1115,6 +1243,14 @@ impl App {
             );
         }
 
+        if self.show_vcarve_settings_modal {
+            element = modal_overlay(
+                element,
+                self.vcarve_settings_modal(),
+                Message::CloseVCarveSettings,
+            );
+        }
+
         element
     }
 
@@ -1158,6 +1294,10 @@ impl App {
 
     fn canvas_scene(&self) -> Option<canvas_view::CanvasScene> {
         let project = self.project.as_ref()?;
+        
+        // Build V-carve debug visualization if any debug edges are stored and settings enabled
+        let vcarve_debug = self.build_vcarve_debug();
+        
         build_scene(
             project,
             self.selected_import,
@@ -1169,7 +1309,85 @@ impl App {
             } else {
                 None
             },
+            vcarve_debug,
         )
+    }
+    
+    fn build_vcarve_debug(&self) -> Option<canvas_view::CanvasVCarveDebug> {
+        let settings = &self.vcarve_debug_settings;
+        
+        // Check if any visualization is enabled
+        if !settings.show_voronoi_pre_prune
+            && !settings.show_voronoi_post_prune
+            && !settings.show_pruned_edges
+            && !settings.show_crease_paths
+            && !settings.show_pocket_boundary_paths
+        {
+            return None;
+        }
+        
+        let mut debug = canvas_view::CanvasVCarveDebug::default();
+        
+        // Aggregate debug edges from all operations
+        for edges in self.vcarve_debug_edges.values() {
+            if settings.show_voronoi_pre_prune {
+                for edge in &edges.pre_prune {
+                    debug.pre_prune_edges.push([
+                        iced::Point::new(edge[0][0], edge[0][1]),
+                        iced::Point::new(edge[1][0], edge[1][1]),
+                    ]);
+                }
+            }
+            
+            if settings.show_voronoi_post_prune {
+                for edge in &edges.post_prune {
+                    debug.post_prune_edges.push([
+                        iced::Point::new(edge[0][0], edge[0][1]),
+                        iced::Point::new(edge[1][0], edge[1][1]),
+                    ]);
+                }
+            }
+            
+            if settings.show_pruned_edges {
+                for edge in &edges.pruned {
+                    debug.pruned_edges.push([
+                        iced::Point::new(edge[0][0], edge[0][1]),
+                        iced::Point::new(edge[1][0], edge[1][1]),
+                    ]);
+                }
+            }
+            
+            if settings.show_crease_paths {
+                for edge in &edges.crease_paths {
+                    debug.crease_paths.push([
+                        iced::Point::new(edge[0][0], edge[0][1]),
+                        iced::Point::new(edge[1][0], edge[1][1]),
+                    ]);
+                }
+            }
+            
+            if settings.show_pocket_boundary_paths {
+                for path in &edges.pocket_boundary_paths {
+                    let points: Vec<iced::Point> = path
+                        .iter()
+                        .map(|p| iced::Point::new(p[0], p[1]))
+                        .collect();
+                    debug.pocket_boundary_paths.push(points);
+                }
+            }
+        }
+        
+        // Return None if no edges were added
+        if debug.pre_prune_edges.is_empty()
+            && debug.post_prune_edges.is_empty()
+            && debug.pruned_edges.is_empty()
+            && debug.crease_paths.is_empty()
+            && debug.pocket_boundary_paths.is_empty()
+        {
+            return None;
+        }
+        
+        Some(debug)
     }
 
     fn build_scene_3d(&self) -> Option<canvas_view_3d::Scene3D> {
@@ -1190,10 +1408,50 @@ impl App {
                 highlighted: self.highlighted_toolpath == Some(*index),
             });
         }
+
+        // Build curves
+        let mut curves = Vec::new();
+        if self.show_3d_curves {
+            let z_level = stock.origin.2 + 0.05; // Slight offset to sit on top of stock
+            let tolerance = 0.5; // Flatten tolerance
+
+            for import in &project.data.imported_svgs {
+                let mut segments = Vec::new();
+                for curve_id in &import.curve_ids {
+                    if let Some(curve) = project.data.shapes.curves.get(curve_id) {
+                        let mut curve = curve.clone();
+                        curve.apply_affine(import.transform);
+
+                        let flattened = curve.flatten(tolerance);
+                        if flattened.len() < 2 {
+                            continue;
+                        }
+                        
+                        let mut segment = Vec::with_capacity(flattened.len());
+                        for (x, y) in flattened {
+                            segment.push((x as f32, y as f32, z_level));
+                        }
+                        if segment.len() >= 2 {
+                            segments.push(segment);
+                        }
+                    }
+                }
+
+                if !segments.is_empty() {
+                    let is_selected = self.selected_import == Some(import.id);
+                    curves.push(canvas_view_3d::Curve3D {
+                        segments,
+                        color: iced::Color::from_rgb8(0x55, 0x55, 0x55),
+                        selected: is_selected,
+                    });
+                }
+            }
+        }
         
         Some(canvas_view_3d::Scene3D {
             stock: Some(stock),
             toolpaths,
+            curves,
         })
     }
 
@@ -1561,6 +1819,45 @@ impl App {
             .into()
     }
 
+    fn vcarve_settings_modal(&self) -> Element<'_, Message> {
+        let settings = &self.vcarve_debug_settings;
+
+        let content = column![
+            text("V-Carve Debug Settings").size(24),
+            text("Path Visualization").size(16),
+            checkbox("Show Crease Paths (blue)", settings.show_crease_paths)
+                .on_toggle(Message::ToggleCreasePaths),
+            checkbox(
+                "Show Pocket Boundary Paths (cyan)",
+                settings.show_pocket_boundary_paths
+            )
+            .on_toggle(Message::TogglePocketBoundaryPaths),
+            text("Voronoi Edge Visualization").size(16),
+            checkbox(
+                "Show Pre-Prune Edges (gray)",
+                settings.show_voronoi_pre_prune
+            )
+            .on_toggle(Message::ToggleVoronoiPrePrune),
+            checkbox(
+                "Show Post-Prune Edges (green)",
+                settings.show_voronoi_post_prune
+            )
+            .on_toggle(Message::ToggleVoronoiPostPrune),
+            checkbox("Show Pruned Edges (red)", settings.show_pruned_edges)
+                .on_toggle(Message::TogglePrunedEdges),
+            row![button("Close").on_press(Message::CloseVCarveSettings),]
+                .spacing(10)
+                .align_y(Alignment::Center),
+        ]
+        .spacing(12);
+
+        container(content)
+            .padding(24)
+            .width(Length::Fixed(380.0))
+            .style(container::rounded_box)
+            .into()
+    }
+
     fn save_tool_library(&self) {
         match ToolLibrary::default_library_path() {
             Ok(path) => {
@@ -1607,11 +1904,17 @@ fn stock_tab_view(stock: &StockSpec) -> Element<'static, Message> {
     card.into()
 }
 
-fn view_3d_tab_view(wireframe_mode: bool) -> Element<'static, Message> {
+fn view_3d_tab_view(wireframe_mode: bool, show_curves: bool) -> Element<'static, Message> {
     let mode_label = if wireframe_mode {
         "Wireframe"
     } else {
         "Solid"
+    };
+
+    let curves_label = if show_curves {
+        "Hide"
+    } else {
+        "Show"
     };
     
     let card = container(
@@ -1623,6 +1926,14 @@ fn view_3d_tab_view(wireframe_mode: bool) -> Element<'static, Message> {
                 button(mode_label)
                     .padding([4, 12])
                     .on_press(Message::Toggle3DStockMode),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            row![
+                text("Imported curves:").size(14),
+                button(curves_label)
+                    .padding([4, 12])
+                    .on_press(Message::Toggle3DCurves),
             ]
             .spacing(8)
             .align_y(Alignment::Center),

@@ -248,6 +248,7 @@ pub struct CanvasScene {
     pub imports: Vec<CanvasImport>,
     pub toolpaths: Vec<CanvasToolpath>,
     pub debug_polygons: Vec<CanvasDebugPolygon>,
+    pub vcarve_debug: Option<CanvasVCarveDebug>,
     pub stock: Option<CanvasStock>,
     pub bounds: Bounds,
 }
@@ -276,6 +277,21 @@ pub struct CanvasToolpath {
 pub struct CanvasDebugPolygon {
     pub color: iced::Color,
     pub segments: Vec<Vec<Point>>,
+}
+
+/// Debug visualization for V-carve Voronoi edges
+#[derive(Debug, Clone, Default)]
+pub struct CanvasVCarveDebug {
+    /// Pre-prune Voronoi edges (light gray)
+    pub pre_prune_edges: Vec<[Point; 2]>,
+    /// Post-prune (kept) Voronoi edges (green)
+    pub post_prune_edges: Vec<[Point; 2]>,
+    /// Pruned (removed) edges (red)
+    pub pruned_edges: Vec<[Point; 2]>,
+    /// Crease path segments (blue)
+    pub crease_paths: Vec<[Point; 2]>,
+    /// Pocket boundary path segments (cyan)
+    pub pocket_boundary_paths: Vec<Vec<Point>>,
 }
 
 #[derive(Debug, Clone)]
@@ -315,6 +331,7 @@ pub fn build_scene(
     highlighted_toolpath: Option<usize>,
     cached_segments: &std::collections::HashMap<usize, Vec<Vec<(f32, f32)>>>,
     debug_polygons: Option<&std::collections::HashMap<usize, Vec<Vec<(f32, f32)>>>>,
+    vcarve_debug: Option<CanvasVCarveDebug>,
 ) -> Option<CanvasScene> {
     let mut bounds: Option<Bounds> = None;
     let mut imports = Vec::new();
@@ -475,6 +492,7 @@ pub fn build_scene(
         imports,
         toolpaths,
         debug_polygons: debug_paths,
+        vcarve_debug,
         stock: Some(CanvasStock { rect: stock_rect }),
         bounds,
     })

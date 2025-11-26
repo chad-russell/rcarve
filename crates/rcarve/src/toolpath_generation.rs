@@ -1,11 +1,11 @@
 use crate::geometry::offset::offset_polygon;
 use crate::geometry::{CurveId, Region};
 use crate::types::{Tool, ToolType};
-use crate::vcarve::PathType;
+use crate::vcarve::{PathType, VCarveDebugOutput};
 use crate::{
-    generate_pocket_toolpath, generate_profile_toolpath, generate_vcarve_toolpath, CarvePolygon,
-    Operation, OperationTarget, Project, ToolLibrary, Toolpath, ToolpathArtifact, ToolpathPass,
-    ToolpathPassKind, ToolpathStatus,
+    generate_pocket_toolpath, generate_profile_toolpath, generate_vcarve_toolpath_with_debug,
+    CarvePolygon, Operation, OperationTarget, Project, ToolLibrary, Toolpath, ToolpathArtifact,
+    ToolpathPass, ToolpathPassKind, ToolpathStatus,
 };
 use anyhow::{anyhow, Context, Result};
 use kurbo::Affine;
@@ -19,6 +19,8 @@ pub struct ToolpathGenerationReport {
     pub status: ToolpathStatus,
     pub warnings: Vec<String>,
     pub error: Option<String>,
+    /// Debug output for V-carve operations (Voronoi edges, etc.)
+    pub vcarve_debug: Option<VCarveDebugOutput>,
 }
 
 /// Generate toolpaths for every operation in the project, updating cached artifacts.
@@ -31,7 +33,7 @@ pub fn generate_toolpaths_for_operations(
     for index in 0..project.operations.len() {
         let operation = project.operations[index].clone();
         match generate_toolpath_for_operation(project, tools, index, &operation) {
-            Ok((artifact, warnings)) => {
+            Ok((artifact, warnings, vcarve_debug)) => {
                 let status = ToolpathStatus::Ready {
                     generated_at_epoch_ms: artifact.generated_at_epoch_ms,
                     warning_count: warnings.len(),
@@ -42,6 +44,7 @@ pub fn generate_toolpaths_for_operations(
                         status: ToolpathStatus::Dirty,
                         warnings: vec![],
                         error: Some(err.to_string()),
+                        vcarve_debug: None,
                     });
                 } else {
                     reports.push(ToolpathGenerationReport {
@@ -49,6 +52,7 @@ pub fn generate_toolpaths_for_operations(
                         status,
                         warnings,
                         error: None,
+                        vcarve_debug,
                     });
                 }
             }
@@ -58,6 +62,7 @@ pub fn generate_toolpaths_for_operations(
                     status: ToolpathStatus::Dirty,
                     warnings: vec![],
                     error: Some(err.to_string()),
+                    vcarve_debug: None,
                 });
             }
         }
@@ -71,7 +76,7 @@ fn generate_toolpath_for_operation(
     tools: &ToolLibrary,
     operation_index: usize,
     operation: &Operation,
-) -> Result<(ToolpathArtifact, Vec<String>)> {
+) -> Result<(ToolpathArtifact, Vec<String>, Option<VCarveDebugOutput>)> {
     let mut warnings = Vec::new();
     let shapes = &project.shapes;
     
@@ -107,6 +112,7 @@ fn generate_toolpath_for_operation(
                     is_valid: true,
                 },
                 warnings,
+                None, // No V-carve debug for Profile
             ))
         }
         Operation::Pocket {
@@ -149,6 +155,7 @@ fn generate_toolpath_for_operation(
                     is_valid: true,
                 },
                 warnings,
+                None, // No V-carve debug for Pocket
             ))
         }
         Operation::VCarve {
@@ -205,12 +212,14 @@ fn generate_toolpath_for_operation(
                 ));
             }
 
-            let vcarve_paths = generate_vcarve_toolpath(&carve_polygons, tool, *target_depth)
-                .with_context(|| format!("V-carve operation {operation_index} failed"))?;
+            // Generate V-carve toolpath with debug data collection
+            let vcarve_result =
+                generate_vcarve_toolpath_with_debug(&carve_polygons, tool, *target_depth, true)
+                    .with_context(|| format!("V-carve operation {operation_index} failed"))?;
 
             // Convert PathType to Toolpath
             let mut finish_paths_3d = Vec::new();
-            for pt in vcarve_paths {
+            for pt in vcarve_result.paths {
                 match pt {
                     PathType::Crease { start, end } => {
                         finish_paths_3d.push(vec![
@@ -243,6 +252,7 @@ fn generate_toolpath_for_operation(
                     is_valid: true,
                 },
                 warnings,
+                vcarve_result.debug, // Include V-carve debug output
             ))
         }
     }

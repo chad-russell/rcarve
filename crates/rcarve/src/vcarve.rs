@@ -6,6 +6,7 @@ use boostvoronoi::{
 };
 use cavalier_contours::polyline::{Polyline, PlineSource, PlineSourceMut, PlineVertex};
 use cavalier_contours::core::math::Vector2;
+use clipper2::{inflate, EndType, JoinType, Path as CPath, PathType as CPathType, Polygon as CPolygon, Polygons as CPolygons, Vertex as CVertex};
 use glam::DVec2;
 
 const SCALE: f64 = 1000.0; // Microns
@@ -35,6 +36,28 @@ pub enum PathType {
     },
 }
 
+/// Debug output containing Voronoi edge information for visualization
+#[derive(Debug, Clone, Default)]
+pub struct VCarveDebugOutput {
+    /// All Voronoi edges before any pruning (finite, primary edges only)
+    pub voronoi_edges_pre_prune: Vec<[[f64; 2]; 2]>,
+    /// Edges that passed pruning and were kept
+    pub voronoi_edges_post_prune: Vec<[[f64; 2]; 2]>,
+    /// Edges that were removed by pruning
+    pub pruned_edges: Vec<[[f64; 2]; 2]>,
+    /// Crease path segments (for separate coloring)
+    pub crease_paths: Vec<[[f64; 3]; 2]>,
+    /// PocketBoundary path segments (for separate coloring)
+    pub pocket_boundary_paths: Vec<Vec<[f64; 2]>>,
+}
+
+/// Result of V-carve toolpath generation with optional debug data
+#[derive(Debug, Clone)]
+pub struct VCarveResult {
+    pub paths: Vec<PathType>,
+    pub debug: Option<VCarveDebugOutput>,
+}
+
 /// Represents a polygon (with optional holes) for V-carving.
 #[derive(Debug, Clone)]
 pub struct CarvePolygon {
@@ -47,11 +70,23 @@ type I = i32;
 type F = f64; // Output coordinate type
 type VBLine = VLine<I>;
 
+/// Generate V-carve toolpath (backward compatible wrapper)
 pub fn generate_vcarve_toolpath(
     polygons: &[CarvePolygon],
     tool: &Tool,
     max_depth: Option<f64>,
 ) -> Result<Vec<PathType>> {
+    let result = generate_vcarve_toolpath_with_debug(polygons, tool, max_depth, false)?;
+    Ok(result.paths)
+}
+
+/// Generate V-carve toolpath with optional debug output
+pub fn generate_vcarve_toolpath_with_debug(
+    polygons: &[CarvePolygon],
+    tool: &Tool,
+    max_depth: Option<f64>,
+    collect_debug: bool,
+) -> Result<VCarveResult> {
     let vbit_angle = match tool.tool_type {
         ToolType::VBit { angle_degrees } => angle_degrees,
         _ => return Err(anyhow!("V-carve requires a V-bit tool")),
@@ -73,6 +108,11 @@ pub fn generate_vcarve_toolpath(
     let pruning_threshold = pruning_angle_threshold_deg.to_radians().cos();
 
     let mut output_paths = Vec::new();
+    let mut debug_output = if collect_debug {
+        Some(VCarveDebugOutput::default())
+    } else {
+        None
+    };
     
     // 1. Normalize Inputs for Cavalier Contours (CCW outer, CW holes)
     // and convert to Boost Voronoi Segments
@@ -134,13 +174,42 @@ pub fn generate_vcarve_toolpath(
             continue;
         }
 
+        // Extract edge coordinates for debug visualization
+        let edge_coords = if collect_debug {
+            extract_edge_coords(&edge, &diagram)
+        } else {
+            None
+        };
+
+        // Record pre-prune edge if collecting debug
+        if let Some(ref mut debug) = debug_output {
+            if let Some(coords) = edge_coords {
+                debug.voronoi_edges_pre_prune.push(coords);
+            }
+        }
+
         // Check 1: Is this a "Comb" artifact? (Normal Dot Product)
-        if !is_valid_medial_edge(&edge, &diagram, pruning_threshold, &vb_segments) {
+        let is_valid = is_valid_medial_edge(&edge, &diagram, pruning_threshold, &vb_segments);
+        
+        if !is_valid {
+            // Record pruned edge if collecting debug
+            if let Some(ref mut debug) = debug_output {
+                if let Some(coords) = edge_coords {
+                    debug.pruned_edges.push(coords);
+                }
+            }
             continue;
         }
 
+        // Record post-prune edge if collecting debug
+        if let Some(ref mut debug) = debug_output {
+            if let Some(coords) = edge_coords {
+                debug.voronoi_edges_post_prune.push(coords);
+            }
+        }
+
         // Sample the edge into 3D moves
-        let samples = sample_edge_to_3d(&edge, &diagram, tan_half_angle, max_depth_value, max_radius, &shape_polylines);
+        let samples = sample_edge_to_3d(&edge, &diagram, tan_half_angle, max_radius, &shape_polylines);
         
         // Convert samples to PathType::Crease
         // samples is Vec<(x,y,z)>
@@ -152,45 +221,104 @@ pub fn generate_vcarve_toolpath(
                     start: [p1.0, p1.1, p1.2],
                     end: [p2.0, p2.1, p2.2],
                 });
+                
+                // Record crease path for debug
+                if let Some(ref mut debug) = debug_output {
+                    debug.crease_paths.push([
+                        [p1.0, p1.1, p1.2],
+                        [p2.0, p2.1, p2.2],
+                    ]);
+                }
             }
         }
     }
 
     // 3. Build Rails (Fixed Depth Pocketing)
     // Only if max_depth is limited
-    if max_depth.is_some() {
-        for pl in &shape_polylines {
-            // Offset inwards: For CCW outer polygons, we want to offset inward (shrink).
-            // For CW holes, we also want to offset inward relative to the carve area.
-            // The cavalier_contours convention: positive delta offsets in the direction
-            // of the left-hand normal (which is inward for CCW polygons).
-            let offsets = pl.parallel_offset(max_radius);
+    if let Some(max_depth_value) = max_depth {
+        let offset_delta = -max_radius;
+
+        for poly in polygons {
+            let mut paths = Vec::new();
             
-            for offset_pl in offsets {
-                let mut points_2d = Vec::new();
-                // Use iter_vertexes() to access vertices
-                for v in offset_pl.iter_vertexes() {
-                    points_2d.push([v.x, v.y]);
+            // Outer
+            let outer_verts: Vec<CVertex> = poly.outer.iter().map(|p| CVertex::new(p.0, p.1)).collect();
+            if !outer_verts.is_empty() {
+                paths.push(CPath::new(outer_verts, true));
+            }
+            
+            // Holes
+            for hole in &poly.holes {
+                let hole_verts: Vec<CVertex> = hole.iter().map(|p| CVertex::new(p.0, p.1)).collect();
+                if !hole_verts.is_empty() {
+                    paths.push(CPath::new(hole_verts, true));
                 }
-                // Close loop if needed
-                if !points_2d.is_empty() {
-                     let first = points_2d[0];
-                     let last = points_2d.last().unwrap();
-                     if (first[0] - last[0]).abs() > 1e-6 || (first[1] - last[1]).abs() > 1e-6 {
-                         points_2d.push(first);
-                     }
-                }
-                if points_2d.len() >= 2 {
+            }
+            
+            if paths.is_empty() { continue; }
+
+            let polygon = CPolygon::new(paths, CPathType::Subject);
+            let input_polygons = CPolygons::new(vec![polygon]);
+            
+            let offset_polygons = inflate(
+                input_polygons,
+                offset_delta,
+                JoinType::Miter,
+                EndType::ClosedPolygon,
+                5.0, // Miter limit
+                0.0, // Arc tolerance
+            );
+            
+            for offset_poly in offset_polygons.polygons() {
+                for path in offset_poly.paths() {
+                    let points: Vec<[f64; 2]> = path.vertices().iter().map(|v| [v.x(), v.y()]).collect();
+                    if points.len() < 2 { continue; }
+                    
+                    let mut closed_points = points.clone();
+                    if let (Some(first), Some(last)) = (closed_points.first(), closed_points.last()) {
+                         if (first[0] - last[0]).abs() > 1e-6 || (first[1] - last[1]).abs() > 1e-6 {
+                             closed_points.push(*first);
+                         }
+                    }
+                    
                     output_paths.push(PathType::PocketBoundary {
-                        path: points_2d,
+                        path: closed_points.clone(),
                         depth: max_depth_value,
                     });
+                    
+                    if let Some(ref mut debug) = debug_output {
+                        debug.pocket_boundary_paths.push(closed_points);
+                    }
                 }
             }
         }
     }
 
-    Ok(output_paths)
+    Ok(VCarveResult {
+        paths: output_paths,
+        debug: debug_output,
+    })
+}
+
+/// Extract 2D coordinates from a Voronoi edge for debug visualization
+fn extract_edge_coords(edge: &Edge, diagram: &Diagram<F>) -> Option<[[f64; 2]; 2]> {
+    let v0_idx = edge.vertex0()?;
+    
+    let twin_id = edge.twin().ok()?;
+    let twin_rc = diagram.get_edge(twin_id).ok()?;
+    let twin = twin_rc.get();
+    let v1_idx = twin.vertex0()?;
+    
+    let v0_rc = diagram.vertices().get(v0_idx.0)?;
+    let v1_rc = diagram.vertices().get(v1_idx.0)?;
+    
+    let p0 = v0_rc.get();
+    let p1 = v1_rc.get();
+    
+    let start = [p0.x() as f64 / SCALE, p0.y() as f64 / SCALE];
+    let end = [p1.x() as f64 / SCALE, p1.y() as f64 / SCALE];
+    
+    Some([start, end])
 }
 
 /// Create a clean Polyline by filtering out duplicate adjacent points
@@ -378,7 +506,6 @@ fn sample_edge_to_3d(
     edge: &Edge,
     diagram: &Diagram<F>, 
     tan_half_angle: f64, 
-    max_depth: f64,
     max_radius: f64,
     polylines: &[Polyline]
 ) -> Vec<(f64, f64, f64)> {
@@ -459,14 +586,15 @@ fn sample_edge_to_3d(
         
         let radius = min_dist_sq.sqrt();
         
-        // Apply Max Radius Bifurcation
-        if radius > max_radius {
+        // Only include points where depth is strictly less than max_depth.
+        // Points at or beyond max_depth are handled by the offset path (PocketBoundary).
+        // Using >= ensures no overlap between crease paths and offset path.
+        if radius >= max_radius {
             return;
         }
         
         let depth = radius / tan_half_angle;
-        // Clamp depth to max_depth just in case floating point noise puts it slightly over
-        let z = -(depth.min(max_depth));
+        let z = -depth;
         
         points.push((pt.x, pt.y, z));
     };

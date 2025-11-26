@@ -132,6 +132,44 @@ impl ToolpathPrimitive {
             }
         }
 
+        // Process V-Carve Debug Visualization
+        if let Some(vcarve_debug) = &scene.vcarve_debug {
+            // Pre-prune Voronoi edges - light gray
+            let pre_prune_color = Color::from_rgba(0.67, 0.67, 0.67, 0.5);
+            for edge in &vcarve_debug.pre_prune_edges {
+                push_line(edge[0], edge[1], pre_prune_color);
+            }
+
+            // Post-prune (kept) Voronoi edges - green
+            let post_prune_color = Color::from_rgba(0.196, 0.804, 0.196, 0.8);
+            for edge in &vcarve_debug.post_prune_edges {
+                push_line(edge[0], edge[1], post_prune_color);
+            }
+
+            // Pruned (removed) edges - red
+            let pruned_color = Color::from_rgba(1.0, 0.267, 0.267, 0.67);
+            for edge in &vcarve_debug.pruned_edges {
+                push_line(edge[0], edge[1], pruned_color);
+            }
+
+            // Crease paths - blue (separate from regular toolpath)
+            let crease_color = Color::from_rgba(0.357, 0.553, 1.0, 0.93);
+            for edge in &vcarve_debug.crease_paths {
+                push_line(edge[0], edge[1], crease_color);
+            }
+
+            // Pocket boundary paths - cyan
+            let pocket_color = Color::from_rgba(0.0, 0.808, 0.82, 0.93);
+            for path in &vcarve_debug.pocket_boundary_paths {
+                if path.len() < 2 {
+                    continue;
+                }
+                for i in 0..path.len() - 1 {
+                    push_line(path[i], path[i + 1], pocket_color);
+                }
+            }
+        }
+
         Self {
             vertices,
             camera: camera.clone(),

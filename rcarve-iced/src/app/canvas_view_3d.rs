@@ -15,6 +15,7 @@ use rcarve::StockSpec;
 pub struct Scene3D {
     pub stock: Option<Stock3D>,
     pub toolpaths: Vec<Toolpath3D>,
+    pub curves: Vec<Curve3D>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,13 @@ pub struct Toolpath3D {
     pub segments: Vec<Vec<(f32, f32, f32)>>,
     pub color: Color,
     pub highlighted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Curve3D {
+    pub segments: Vec<Vec<(f32, f32, f32)>>,
+    pub color: Color,
+    pub selected: bool,
 }
 
 pub struct Workspace3DView {
@@ -181,6 +189,11 @@ impl Scene3DPrimitive {
             for toolpath in &scene.toolpaths {
                 Self::generate_toolpath_lines(toolpath, &mut line_vertices);
             }
+
+            // Generate curve geometry
+            for curve in &scene.curves {
+                Self::generate_curve_lines(curve, &mut line_vertices);
+            }
         }
 
         Self {
@@ -298,6 +311,32 @@ impl Scene3DPrimitive {
         };
 
         for segment in &toolpath.segments {
+            if segment.len() < 2 {
+                continue;
+            }
+            for i in 0..segment.len() - 1 {
+                let (x1, y1, z1) = segment[i];
+                let (x2, y2, z2) = segment[i + 1];
+                vertices.push(Vertex3D {
+                    position: [x1, y1, z1],
+                    color,
+                });
+                vertices.push(Vertex3D {
+                    position: [x2, y2, z2],
+                    color,
+                });
+            }
+        }
+    }
+
+    fn generate_curve_lines(curve: &Curve3D, vertices: &mut Vec<Vertex3D>) {
+        let color = if curve.selected {
+            [0.99, 0.49, 0.08, 1.0] // Orange for selected
+        } else {
+            [curve.color.r, curve.color.g, curve.color.b, 1.0]
+        };
+
+        for segment in &curve.segments {
             if segment.len() < 2 {
                 continue;
             }

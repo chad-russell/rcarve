@@ -116,14 +116,21 @@ fn operations_header(is_generating: bool, show_debug_polygons: bool) -> Element<
             generate_button,
         ]
         .spacing(8),
-        button(if show_debug_polygons {
-            "Hide Polygon Outlines"
-        } else {
-            "Show Polygon Outlines"
-        })
-        .on_press(Message::ToggleDebugPolygons)
-        .padding([6, 14])
-        .style(|_theme, _state| secondary_button_style()),
+        row![
+            button(if show_debug_polygons {
+                "Hide Polygon Outlines"
+            } else {
+                "Show Polygon Outlines"
+            })
+            .on_press(Message::ToggleDebugPolygons)
+            .padding([6, 14])
+            .style(|_theme, _state| secondary_button_style()),
+            button("V-Carve Debug")
+                .on_press(Message::OpenVCarveSettings)
+                .padding([6, 14])
+                .style(|_theme, _state| secondary_button_style()),
+        ]
+        .spacing(8),
     ]
     .spacing(12)
     .into()
