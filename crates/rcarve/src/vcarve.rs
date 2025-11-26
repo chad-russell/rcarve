@@ -208,26 +208,27 @@ pub fn generate_vcarve_toolpath_with_debug(
             }
         }
 
-        // Sample the edge into 3D moves
-        let samples = sample_edge_to_3d(&edge, &diagram, tan_half_angle, max_depth_value, &shape_polylines);
+        // Sample the edge into 3D moves (can be multiple segments if depth limited)
+        let sample_chains = sample_edge_to_3d(&edge, &diagram, tan_half_angle, max_depth_value, &shape_polylines);
         
         // Convert samples to PathType::Crease
-        // samples is Vec<(x,y,z)>
-        if samples.len() >= 2 {
-            for i in 0..samples.len() - 1 {
-                let p1 = samples[i];
-                let p2 = samples[i+1];
-                output_paths.push(PathType::Crease {
-                    start: [p1.0, p1.1, p1.2],
-                    end: [p2.0, p2.1, p2.2],
-                });
-                
-                // Record crease path for debug
-                if let Some(ref mut debug) = debug_output {
-                    debug.crease_paths.push([
-                        [p1.0, p1.1, p1.2],
-                        [p2.0, p2.1, p2.2],
-                    ]);
+        for samples in sample_chains {
+            if samples.len() >= 2 {
+                for i in 0..samples.len() - 1 {
+                    let p1 = samples[i];
+                    let p2 = samples[i+1];
+                    output_paths.push(PathType::Crease {
+                        start: [p1.0, p1.1, p1.2],
+                        end: [p2.0, p2.1, p2.2],
+                    });
+                    
+                    // Record crease path for debug
+                    if let Some(ref mut debug) = debug_output {
+                        debug.crease_paths.push([
+                            [p1.0, p1.1, p1.2],
+                            [p2.0, p2.1, p2.2],
+                        ]);
+                    }
                 }
             }
         }
@@ -504,7 +505,7 @@ fn sample_edge_to_3d(
     tan_half_angle: f64,
     max_depth: f64, 
     polylines: &[Polyline]
-) -> Vec<(f64, f64, f64)> {
+) -> Vec<Vec<(f64, f64, f64)>> {
     let v0_idx = edge.vertex0();
     if v0_idx.is_none() {
         return Vec::new();
@@ -540,31 +541,21 @@ fn sample_edge_to_3d(
     let start = DVec2::new(p0.x() as f64 / SCALE, p0.y() as f64 / SCALE);
     let end = DVec2::new(p1.x() as f64 / SCALE, p1.y() as f64 / SCALE);
     
-    let mut points = Vec::new();
+    let max_radius = max_depth * tan_half_angle;
+
+    // Collect raw samples with radius
+    let mut raw_samples: Vec<Option<(DVec2, f64)>> = Vec::new();
     
-    // Helper to calc Z and push
-    let mut add_point = |pt: DVec2| {
+    let get_sample = |pt: DVec2| -> Option<(DVec2, f64)> {
         // Check inside polygon
         let mut is_inside = false;
         for pl in polylines {
-             // Fix: Use Vector2 for winding_number
              if pl.winding_number(Vector2::new(pt.x, pt.y)) != 0 {
                  is_inside = true;
                  break;
              }
         }
-        
-        if !is_inside {
-            return; 
-        }
-
-        // Calculate distance to site (Radius)
-        // We can find the closest distance to ANY site, or the specific site for this cell.
-        // For a valid medial axis point, distance to site_a == distance to site_b.
-        // We'll use site_a.
-        
-        // Since we don't have easy access to site geometry from cell->site, 
-        // we estimate distance as distance to nearest polyline (accurate enough for v-carve).
+        if !is_inside { return None; }
         
         let mut min_dist_sq = f64::MAX;
         for pl in polylines {
@@ -579,21 +570,12 @@ fn sample_edge_to_3d(
                 min_dist_sq = min_dist_sq.min(dist_sq);
             }
         }
-        
-        let radius = min_dist_sq.sqrt();
-        
-        // Calculate depth from radius, clamped to max_depth.
-        // We do NOT filter by max_radius anymore. This ensures the toolpath is continuous
-        // even in wide areas (where it acts as a centerline clearing pass at max_depth).
-        let depth = radius / tan_half_angle;
-        let z = -(depth.min(max_depth));
-        
-        points.push((pt.x, pt.y, z));
+        Some((pt, min_dist_sq.sqrt()))
     };
 
     if edge.is_linear() {
-        add_point(start);
-        add_point(end);
+        raw_samples.push(get_sample(start));
+        raw_samples.push(get_sample(end));
     } else {
         // Curved edge (Parabolic)
         // Subdivide.
@@ -602,11 +584,71 @@ fn sample_edge_to_3d(
              let t = i as f64 / count as f64;
              // Linear approximation for now
              let pt = start.lerp(end, t);
-             add_point(pt);
+             raw_samples.push(get_sample(pt));
+        }
+    }
+
+    let mut chains = Vec::new();
+    let mut current_chain = Vec::new();
+    
+    for i in 0..raw_samples.len().saturating_sub(1) {
+        let u_opt = raw_samples[i];
+        let v_opt = raw_samples[i+1];
+        
+        if u_opt.is_none() || v_opt.is_none() {
+            if !current_chain.is_empty() {
+                chains.push(current_chain);
+                current_chain = Vec::new();
+            }
+            continue;
+        }
+        
+        let (u_pt, u_r) = u_opt.unwrap();
+        let (v_pt, v_r) = v_opt.unwrap();
+        
+        let u_valid = u_r <= max_radius;
+        let v_valid = v_r <= max_radius;
+        
+        if u_valid && v_valid {
+            if current_chain.is_empty() {
+                current_chain.push((u_pt.x, u_pt.y, -(u_r / tan_half_angle)));
+            }
+            current_chain.push((v_pt.x, v_pt.y, -(v_r / tan_half_angle)));
+        } else if u_valid && !v_valid {
+            if current_chain.is_empty() {
+                current_chain.push((u_pt.x, u_pt.y, -(u_r / tan_half_angle)));
+            }
+            // Interpolate transition point
+            let t = (max_radius - u_r) / (v_r - u_r);
+            let pt = u_pt + (v_pt - u_pt) * t;
+            current_chain.push((pt.x, pt.y, -max_depth));
+            
+            chains.push(current_chain);
+            current_chain = Vec::new();
+        } else if !u_valid && v_valid {
+            if !current_chain.is_empty() {
+                chains.push(current_chain);
+                current_chain = Vec::new();
+            }
+            // Interpolate transition point
+            let t = (max_radius - u_r) / (v_r - u_r);
+            let pt = u_pt + (v_pt - u_pt) * t;
+            current_chain.push((pt.x, pt.y, -max_depth));
+            current_chain.push((v_pt.x, v_pt.y, -(v_r / tan_half_angle)));
+        } else {
+            // Both invalid - skip
+             if !current_chain.is_empty() {
+                chains.push(current_chain);
+                current_chain = Vec::new();
+            }
         }
     }
     
-    points
+    if !current_chain.is_empty() {
+        chains.push(current_chain);
+    }
+    
+    chains
 }
 
 fn distance_sq_to_segment(p: DVec2, a: DVec2, b: DVec2) -> f64 {
