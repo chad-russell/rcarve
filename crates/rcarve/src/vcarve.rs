@@ -209,7 +209,7 @@ pub fn generate_vcarve_toolpath_with_debug(
         }
 
         // Sample the edge into 3D moves
-        let samples = sample_edge_to_3d(&edge, &diagram, tan_half_angle, max_radius, &shape_polylines);
+        let samples = sample_edge_to_3d(&edge, &diagram, tan_half_angle, max_depth_value, &shape_polylines);
         
         // Convert samples to PathType::Crease
         // samples is Vec<(x,y,z)>
@@ -237,26 +237,22 @@ pub fn generate_vcarve_toolpath_with_debug(
     // Only if max_depth is limited
     if let Some(max_depth_value) = max_depth {
         let offset_delta = -max_radius;
-
-        for poly in polygons {
-            let mut paths = Vec::new();
-            
-            // Outer
-            let outer_verts: Vec<CVertex> = poly.outer.iter().map(|p| CVertex::new(p.0, p.1)).collect();
-            if !outer_verts.is_empty() {
-                paths.push(CPath::new(outer_verts, true));
+        
+        // Use shape_polylines which are already cleaned and oriented correctly
+        // (Outer CCW, Holes CW) for Clipper
+        let mut paths = Vec::new();
+        for pl in &shape_polylines {
+            let mut verts = Vec::new();
+            for i in 0..pl.vertex_count() {
+                let v = pl.at(i);
+                verts.push(CVertex::new(v.x, v.y));
             }
-            
-            // Holes
-            for hole in &poly.holes {
-                let hole_verts: Vec<CVertex> = hole.iter().map(|p| CVertex::new(p.0, p.1)).collect();
-                if !hole_verts.is_empty() {
-                    paths.push(CPath::new(hole_verts, true));
-                }
+            if !verts.is_empty() {
+                paths.push(CPath::new(verts, true));
             }
-            
-            if paths.is_empty() { continue; }
+        }
 
+        if !paths.is_empty() {
             let polygon = CPolygon::new(paths, CPathType::Subject);
             let input_polygons = CPolygons::new(vec![polygon]);
             
@@ -505,8 +501,8 @@ fn is_valid_medial_edge(
 fn sample_edge_to_3d(
     edge: &Edge,
     diagram: &Diagram<F>, 
-    tan_half_angle: f64, 
-    max_radius: f64,
+    tan_half_angle: f64,
+    max_depth: f64, 
     polylines: &[Polyline]
 ) -> Vec<(f64, f64, f64)> {
     let v0_idx = edge.vertex0();
@@ -586,15 +582,11 @@ fn sample_edge_to_3d(
         
         let radius = min_dist_sq.sqrt();
         
-        // Only include points where depth is strictly less than max_depth.
-        // Points at or beyond max_depth are handled by the offset path (PocketBoundary).
-        // Using >= ensures no overlap between crease paths and offset path.
-        if radius >= max_radius {
-            return;
-        }
-        
+        // Calculate depth from radius, clamped to max_depth.
+        // We do NOT filter by max_radius anymore. This ensures the toolpath is continuous
+        // even in wide areas (where it acts as a centerline clearing pass at max_depth).
         let depth = radius / tan_half_angle;
-        let z = -depth;
+        let z = -(depth.min(max_depth));
         
         points.push((pt.x, pt.y, z));
     };
