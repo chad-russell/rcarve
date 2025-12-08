@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rcarve — CNC Toolpath Generator</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app">
+        <!-- ===== MENU BAR ===== -->
+        <header class="menu-bar">
+            <div class="menu-left">
+                <div class="app-logo">
+                    <svg width="20" height="20" viewBox="0 0 28 28" fill="none">
+                        <rect x="2" y="2" width="24" height="24" rx="4" stroke="currentColor" stroke-width="2"/>
+                        <path d="M8 14h12M14 8v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <circle cx="14" cy="14" r="3" fill="currentColor"/>
+                    </svg>
+                </div>
+                <nav class="menu-items">
+                    <div class="menu-dropdown">
+                        <button class="menu-trigger">File</button>
+                        <div class="menu-content">
+                            <button class="menu-item"><span>New Project</span><kbd>⌘N</kbd></button>
+                            <button class="menu-item"><span>Open Project...</span><kbd>⌘O</kbd></button>
+                            <div class="menu-divider"></div>
+                            <button class="menu-item"><span>Import SVG...</span><kbd>⌘I</kbd></button>
+                            <div class="menu-divider"></div>
+                            <button class="menu-item"><span>Export G-Code...</span><kbd>⌘E</kbd></button>
+                            <button class="menu-item"><span>Export Toolpaths...</span></button>
+                        </div>
+                    </div>
+                    <div class="menu-dropdown">
+                        <button class="menu-trigger">Edit</button>
+                        <div class="menu-content">
+                            <button class="menu-item disabled"><span>Undo</span><kbd>⌘Z</kbd></button>
+                            <button class="menu-item disabled"><span>Redo</span><kbd>⇧⌘Z</kbd></button>
+                            <div class="menu-divider"></div>
+                            <button class="menu-item"><span>Delete Selection</span><kbd>⌫</kbd></button>
+                            <button class="menu-item"><span>Select All</span><kbd>⌘A</kbd></button>
+                        </div>
+                    </div>
+                    <div class="menu-dropdown">
+                        <button class="menu-trigger">View</button>
+                        <div class="menu-content">
+                            <button class="menu-item checked"><span>Show Grid</span><kbd>⌘'</kbd></button>
+                            <button class="menu-item"><span>Show Rulers</span><kbd>⌘R</kbd></button>
+                            <div class="menu-divider"></div>
+                            <button class="menu-item"><span>Zoom In</span><kbd>⌘+</kbd></button>
+                            <button class="menu-item"><span>Zoom Out</span><kbd>⌘-</kbd></button>
+                            <button class="menu-item"><span>Zoom to Fit</span><kbd>⌘0</kbd></button>
+                            <div class="menu-divider"></div>
+                            <button class="menu-item checked"><span>2D View</span></button>
+                            <button class="menu-item"><span>3D View</span></button>
+                        </div>
+                    </div>
+                    <div class="menu-dropdown">
+                        <button class="menu-trigger">Operations</button>
+                        <div class="menu-content">
+                            <button class="menu-item" data-action="add-profile"><span>Add Profile...</span></button>
+                            <button class="menu-item" data-action="add-pocket"><span>Add Pocket...</span></button>
+                            <button class="menu-item" data-action="add-vcarve"><span>Add V-Carve...</span></button>
+                            <div class="menu-divider"></div>
+                            <button class="menu-item" data-action="generate"><span>Generate All Toolpaths</span><kbd>⌘G</kbd></button>
+                            <button class="menu-item"><span>Clear All Toolpaths</span></button>
+                        </div>
+                    </div>
+                    <div class="menu-dropdown">
+                        <button class="menu-trigger">Tools</button>
+                        <div class="menu-content">
+                            <button class="menu-item" data-action="open-tools"><span>Tool Library...</span><kbd>⌘T</kbd></button>
+                            <div class="menu-divider"></div>
+                            <button class="menu-item"><span>Add New Tool...</span></button>
+                        </div>
+                    </div>
+                    <div class="menu-dropdown">
+                        <button class="menu-trigger">Help</button>
+                        <div class="menu-content">
+                            <button class="menu-item"><span>Keyboard Shortcuts</span><kbd>⌘/</kbd></button>
+                            <button class="menu-item"><span>Documentation</span></button>
+                            <div class="menu-divider"></div>
+                            <button class="menu-item"><span>About Rcarve</span></button>
+                        </div>
+                    </div>
+                </nav>
+            </div>
+            <div class="menu-center">
+                <span class="project-title">Bar Sign</span>
+            </div>
+            <div class="menu-right">
+                <button class="menu-icon-btn" title="Settings">
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                        <circle cx="9" cy="9" r="2.5" stroke="currentColor" stroke-width="1.5"/>
+                        <path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.2 4.2l1.4 1.4M12.4 12.4l1.4 1.4M4.2 13.8l1.4-1.4M12.4 5.6l1.4-1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- ===== TOOLBAR ===== -->
+        <div class="toolbar">
+            <div class="toolbar-section">
+                <div class="tool-group">
+                    <button class="tool-btn active" title="Select (V)" data-tool="select">
+                        <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                            <path d="M4 3l10 6-4 1-1 4-5-11z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                    <button class="tool-btn" title="Pan (H)" data-tool="pan">
+                        <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                            <path d="M9 3v12M3 9h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                            <path d="M6 6l3-3 3 3M6 12l3 3 3-3M6 6l-3 3 3 3M12 6l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="toolbar-divider"></div>
+                <div class="tool-group">
+                    <button class="tool-btn" title="Zoom to Fit (0)">
+                        <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                            <rect x="4" y="4" width="10" height="10" rx="1" stroke="currentColor" stroke-width="1.5"/>
+                            <path d="M4 7h2M4 11h2M12 7h2M12 11h2M7 4v2M11 4v2M7 12v2M11 12v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                    <button class="tool-btn" title="Zoom In (+)">
+                        <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                            <circle cx="8" cy="8" r="5" stroke="currentColor" stroke-width="1.5"/>
+                            <path d="M12 12l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                            <path d="M8 6v4M6 8h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                    <button class="tool-btn" title="Zoom Out (-)">
+                        <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                            <circle cx="8" cy="8" r="5" stroke="currentColor" stroke-width="1.5"/>
+                            <path d="M12 12l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                            <path d="M6 8h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                    <span class="zoom-indicator">100%</span>
+                </div>
+            </div>
+            
+            <div class="toolbar-section toolbar-center">
+                <button class="action-btn" data-action="add-profile">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                        <path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                    Profile
+                </button>
+                <button class="action-btn" data-action="add-pocket">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                        <path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                    Pocket
+                </button>
+                <button class="action-btn" data-action="add-vcarve">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                        <path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                    V-Carve
+                </button>
+            </div>
+
+            <div class="toolbar-section">
+                <button class="generate-btn" id="generateBtn">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                        <path d="M2 7l3.5 3.5L12 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    Generate
+                </button>
+                <div class="toolbar-divider"></div>
+                <div class="view-toggle">
+                    <button class="view-btn active" data-view="2d">2D</button>
+                    <button class="view-btn" data-view="3d">3D</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== MAIN CONTENT ===== -->
+        <div class="main-content">
+            <!-- ===== LEFT PANEL: PROJECT BROWSER ===== -->
+            <aside class="panel panel-left" id="projectPanel">
+                <div class="panel-header">
+                    <span class="panel-title">Project</span>
+                    <button class="panel-collapse" data-panel="left">
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                            <path d="M9 3l-5 4 5 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="panel-body">
+                    <!-- Stock Section -->
+                    <div class="tree-section">
+                        <button class="tree-header" data-section="stock">
+                            <svg class="tree-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none">
+                                <path d="M4 3l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            <svg class="tree-icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                <rect x="2" y="2" width="10" height="10" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
+                            </svg>
+                            <span>Stock</span>
+                        </button>
+                        <div class="tree-content">
+                            <button class="tree-item selected" data-select="stock">
+                                <span class="tree-item-label">200 × 150 × 18 mm</span>
+                                <span class="tree-item-meta">Walnut</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Imports Section -->
+                    <div class="tree-section">
+                        <button class="tree-header" data-section="imports">
+                            <svg class="tree-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none">
+                                <path d="M4 3l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            <svg class="tree-icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                <path d="M3 11V3a1 1 0 011-1h4.5L11 4.5V11a1 1 0 01-1 1H4a1 1 0 01-1-1z" stroke="currentColor" stroke-width="1.2"/>
+                                <path d="M8 2v3h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            <span>Imports</span>
+                            <span class="tree-count">2</span>
+                        </button>
+                        <div class="tree-content">
+                            <button class="tree-item" data-select="import-1">
+                                <span class="tree-item-icon">
+                                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                                        <circle cx="6" cy="6" r="4" stroke="currentColor" stroke-width="1.2"/>
+                                    </svg>
+                                </span>
+                                <span class="tree-item-label">logo.svg</span>
+                                <span class="tree-item-meta">12 curves</span>
+                            </button>
+                            <button class="tree-item" data-select="import-2">
+                                <span class="tree-item-icon">
+                                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                                        <rect x="2" y="2" width="8" height="8" rx="1" stroke="currentColor" stroke-width="1.2"/>
+                                    </svg>
+                                </span>
+                                <span class="tree-item-label">border.svg</span>
+                                <span class="tree-item-meta">4 curves</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Operations Section -->
+                    <div class="tree-section">
+                        <button class="tree-header" data-section="operations">
+                            <svg class="tree-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none">
+                                <path d="M4 3l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            <svg class="tree-icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                <path d="M3 4h8M3 7h8M3 10h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                            </svg>
+                            <span>Operations</span>
+                            <span class="tree-count">3</span>
+                        </button>
+                        <div class="tree-content">
+                            <button class="tree-item" data-select="op-0">
+                                <span class="tree-item-color" style="background: #5B8DFF;"></span>
+                                <span class="tree-item-label">Profile Cut</span>
+                                <span class="tree-item-status ready">●</span>
+                            </button>
+                            <button class="tree-item" data-select="op-1">
+                                <span class="tree-item-color" style="background: #FF986C;"></span>
+                                <span class="tree-item-label">Pocket Clear</span>
+                                <span class="tree-item-status dirty">●</span>
+                            </button>
+                            <button class="tree-item" data-select="op-2">
+                                <span class="tree-item-color" style="background: #8BE966;"></span>
+                                <span class="tree-item-label">V-Carve Logo</span>
+                                <span class="tree-item-status ready">●</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- ===== CANVAS ===== -->
+            <main class="canvas-area">
+                <div class="canvas-container" id="canvas">
+                    <div class="canvas-grid"></div>
+                    <svg class="canvas-svg" viewBox="0 0 200 150" preserveAspectRatio="xMidYMid meet">
+                        <!-- Stock outline -->
+                        <rect x="0" y="0" width="200" height="150" fill="none" stroke="#3a4a5c" stroke-width="0.5" stroke-dasharray="4 2"/>
+                        
+                        <!-- Imported curves -->
+                        <g class="imported-curves">
+                            <path d="M60 40 L140 40 L140 110 L60 110 Z" fill="none" stroke="#64748b" stroke-width="1"/>
+                            <text x="100" y="80" text-anchor="middle" font-family="Outfit" font-size="24" fill="none" stroke="#64748b" stroke-width="0.8">BAR</text>
+                        </g>
+                        
+                        <!-- Toolpaths -->
+                        <g class="toolpath visible" data-operation="0">
+                            <path d="M57 37 L143 37 L143 113 L57 113 Z" fill="none" stroke="#5B8DFF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </g>
+                        <g class="toolpath visible" data-operation="2">
+                            <path d="M70 75 Q90 55 100 75 Q110 95 130 75" fill="none" stroke="#8BE966" stroke-width="1" stroke-linecap="round"/>
+                            <path d="M65 80 L135 80" fill="none" stroke="#8BE966" stroke-width="0.5" stroke-dasharray="2 1"/>
+                        </g>
+                        
+                        <!-- Selection gizmo -->
+                        <g class="selection-gizmo">
+                            <rect x="58" y="38" width="84" height="74" fill="none" stroke="#00d9ff" stroke-width="1" stroke-dasharray="4 2"/>
+                            <rect x="54" y="34" width="8" height="8" fill="#1a2332" stroke="#00d9ff" stroke-width="1.5" rx="1"/>
+                            <rect x="138" y="34" width="8" height="8" fill="#1a2332" stroke="#00d9ff" stroke-width="1.5" rx="1"/>
+                            <rect x="54" y="108" width="8" height="8" fill="#1a2332" stroke="#00d9ff" stroke-width="1.5" rx="1"/>
+                            <rect x="138" y="108" width="8" height="8" fill="#1a2332" stroke="#00d9ff" stroke-width="1.5" rx="1"/>
+                            <line x1="100" y1="38" x2="100" y2="24" stroke="#00d9ff" stroke-width="1.5"/>
+                            <circle cx="100" cy="20" r="5" fill="#00d9ff" stroke="#1a2332" stroke-width="1.5"/>
+                        </g>
+                    </svg>
+                    <div class="canvas-label">200 × 150 mm</div>
+                </div>
+            </main>
+
+            <!-- ===== RIGHT PANEL: INSPECTOR ===== -->
+            <aside class="panel panel-right" id="inspectorPanel">
+                <div class="panel-header">
+                    <span class="panel-title">Inspector</span>
+                    <button class="panel-collapse" data-panel="right">
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                            <path d="M5 3l5 4-5 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="panel-body">
+                    <!-- Stock Inspector (default/example) -->
+                    <div class="inspector-section" id="inspector-stock">
+                        <div class="inspector-header">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                                <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/>
+                            </svg>
+                            <span>Stock</span>
+                        </div>
+                        
+                        <div class="inspector-group">
+                            <label class="inspector-label">Dimensions</label>
+                            <div class="dimension-inputs">
+                                <div class="dim-input">
+                                    <span class="dim-prefix">W</span>
+                                    <input type="text" class="input-field mono" value="200.00">
+                                </div>
+                                <div class="dim-input">
+                                    <span class="dim-prefix">H</span>
+                                    <input type="text" class="input-field mono" value="150.00">
+                                </div>
+                                <div class="dim-input">
+                                    <span class="dim-prefix">D</span>
+                                    <input type="text" class="input-field mono" value="18.00">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Material</label>
+                            <input type="text" class="input-field" value="Walnut" placeholder="Optional">
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Origin</label>
+                            <select class="select-field">
+                                <option selected>Bottom-left corner</option>
+                                <option>Center</option>
+                                <option>Top-left corner</option>
+                            </select>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Origin Offset</label>
+                            <div class="coord-inputs">
+                                <div class="coord-input">
+                                    <span class="coord-prefix">X</span>
+                                    <input type="text" class="input-field mono" value="0.00">
+                                </div>
+                                <div class="coord-input">
+                                    <span class="coord-prefix">Y</span>
+                                    <input type="text" class="input-field mono" value="0.00">
+                                </div>
+                                <div class="coord-input">
+                                    <span class="coord-prefix">Z</span>
+                                    <input type="text" class="input-field mono" value="0.00">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Import Inspector (hidden by default) -->
+                    <div class="inspector-section hidden" id="inspector-import">
+                        <div class="inspector-header">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                                <path d="M4 13V3a1.5 1.5 0 011.5-1.5H10L13 4.5V13a1.5 1.5 0 01-1.5 1.5h-6A1.5 1.5 0 014 13z" stroke="currentColor" stroke-width="1.5"/>
+                            </svg>
+                            <span>logo.svg</span>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Position</label>
+                            <div class="coord-inputs">
+                                <div class="coord-input">
+                                    <span class="coord-prefix">X</span>
+                                    <input type="text" class="input-field mono" value="60.00">
+                                </div>
+                                <div class="coord-input">
+                                    <span class="coord-prefix">Y</span>
+                                    <input type="text" class="input-field mono" value="40.00">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Size</label>
+                            <div class="coord-inputs">
+                                <div class="coord-input">
+                                    <span class="coord-prefix">W</span>
+                                    <input type="text" class="input-field mono" value="80.00">
+                                </div>
+                                <div class="coord-input">
+                                    <span class="coord-prefix">H</span>
+                                    <input type="text" class="input-field mono" value="70.00">
+                                </div>
+                                <button class="lock-btn active" title="Lock aspect ratio">
+                                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                        <rect x="3" y="6" width="8" height="6" rx="1" stroke="currentColor" stroke-width="1.2"/>
+                                        <path d="M5 6V4a2 2 0 114 0v2" stroke="currentColor" stroke-width="1.2"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Rotation</label>
+                            <div class="single-input">
+                                <input type="text" class="input-field mono" value="0.00">
+                                <span class="input-suffix">°</span>
+                            </div>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Info</label>
+                            <div class="info-grid">
+                                <span class="info-label">Curves</span>
+                                <span class="info-value">12</span>
+                                <span class="info-label">Shapes</span>
+                                <span class="info-value">3</span>
+                            </div>
+                        </div>
+
+                        <div class="inspector-actions">
+                            <button class="btn-secondary">Delete Import</button>
+                        </div>
+                    </div>
+
+                    <!-- Operation Inspector (hidden by default) -->
+                    <div class="inspector-section hidden" id="inspector-operation">
+                        <div class="inspector-header">
+                            <span class="op-color-dot" style="background: #5B8DFF;"></span>
+                            <span>Profile Cut</span>
+                            <span class="op-status-badge ready">Ready</span>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Type</label>
+                            <div class="segmented-control">
+                                <button class="segment active">Profile</button>
+                                <button class="segment">Pocket</button>
+                                <button class="segment">V-Carve</button>
+                            </div>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Target Depth</label>
+                            <div class="single-input">
+                                <input type="text" class="input-field mono" value="-5.00">
+                                <span class="input-suffix">mm</span>
+                            </div>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Cut Side</label>
+                            <div class="segmented-control">
+                                <button class="segment active">Outside</button>
+                                <button class="segment">Inside</button>
+                                <button class="segment">On Line</button>
+                            </div>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Tool</label>
+                            <select class="select-field">
+                                <option selected>6mm Endmill</option>
+                                <option>60° V-Bit</option>
+                                <option>3mm Ballnose</option>
+                            </select>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Selection</label>
+                            <div class="selection-display">
+                                <span>4 curves selected</span>
+                                <button class="btn-link">Reselect</button>
+                            </div>
+                        </div>
+
+                        <div class="inspector-group">
+                            <label class="inspector-label">Visibility</label>
+                            <label class="toggle-switch">
+                                <input type="checkbox" checked>
+                                <span class="toggle-slider"></span>
+                                <span class="toggle-label">Show toolpath</span>
+                            </label>
+                        </div>
+
+                        <div class="inspector-actions">
+                            <button class="btn-secondary danger">Delete Operation</button>
+                        </div>
+                    </div>
+
+                    <!-- Empty State -->
+                    <div class="inspector-section hidden" id="inspector-empty">
+                        <div class="empty-state">
+                            <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                                <circle cx="24" cy="24" r="20" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 4"/>
+                                <path d="M18 24h12M24 18v12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                            </svg>
+                            <p>Select an item to view its properties</p>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <!-- ===== STATUS BAR ===== -->
+        <footer class="status-bar">
+            <div class="status-left">
+                <span class="status-item">
+                    <span class="status-dot ready"></span>
+                    2 of 3 ready
+                </span>
+                <span class="status-divider">|</span>
+                <span class="status-item">Selection: logo.svg</span>
+            </div>
+            <div class="status-right">
+                <span class="status-item">
+                    <span class="coord-label">X:</span>
+                    <span class="coord-value mono">100.00</span>
+                    <span class="coord-label">Y:</span>
+                    <span class="coord-value mono">75.00</span>
+                </span>
+                <span class="status-divider">|</span>
+                <span class="status-item">Grid: 10mm</span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- ===== MODALS ===== -->
+    
+    <!-- Tool Library Modal -->
+    <div class="modal-overlay" id="toolLibraryModal">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h2>Tool Library</h2>
+                <button class="modal-close" data-close-modal>
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M5 5l10 10M15 5l-10 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="tool-library-header">
+                    <button class="btn-primary">
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                            <path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                        Add Tool
+                    </button>
+                </div>
+                <div class="tool-library-list">
+                    <div class="tool-library-item">
+                        <div class="tool-icon endmill">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                                <rect x="9" y="4" width="6" height="16" rx="1" stroke="currentColor" stroke-width="1.5"/>
+                                <path d="M9 8h6M9 12h6" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                            </svg>
+                        </div>
+                        <div class="tool-details">
+                            <span class="tool-name">6mm Endmill</span>
+                            <span class="tool-specs">Ø6.00mm • 40% stepover • 3mm pass</span>
+                        </div>
+                        <div class="tool-actions">
+                            <button class="btn-icon" title="Edit">
+                                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                    <path d="M10 2l2 2-7 7H3v-2l7-7z" stroke="currentColor" stroke-width="1.2"/>
+                                </svg>
+                            </button>
+                            <button class="btn-icon danger" title="Delete">
+                                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                    <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="tool-library-item">
+                        <div class="tool-icon vbit">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                                <path d="M8 4l4 16 4-16" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                            </svg>
+                        </div>
+                        <div class="tool-details">
+                            <span class="tool-name">60° V-Bit</span>
+                            <span class="tool-specs">60° • Ø12.00mm</span>
+                        </div>
+                        <div class="tool-actions">
+                            <button class="btn-icon" title="Edit">
+                                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                    <path d="M10 2l2 2-7 7H3v-2l7-7z" stroke="currentColor" stroke-width="1.2"/>
+                                </svg>
+                            </button>
+                            <button class="btn-icon danger" title="Delete">
+                                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                    <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="tool-library-item">
+                        <div class="tool-icon ballnose">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                                <path d="M9 4v12a3 3 0 006 0V4" stroke="currentColor" stroke-width="1.5"/>
+                            </svg>
+                        </div>
+                        <div class="tool-details">
+                            <span class="tool-name">3mm Ballnose</span>
+                            <span class="tool-specs">Ø3.00mm • 30% stepover • 1mm pass</span>
+                        </div>
+                        <div class="tool-actions">
+                            <button class="btn-icon" title="Edit">
+                                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                    <path d="M10 2l2 2-7 7H3v-2l7-7z" stroke="currentColor" stroke-width="1.2"/>
+                                </svg>
+                            </button>
+                            <button class="btn-icon danger" title="Delete">
+                                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                    <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Operation Modal -->
+    <div class="modal-overlay" id="operationModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>Add Operation</h2>
+                <button class="modal-close" data-close-modal>
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M5 5l10 10M15 5l-10 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Operation Type</label>
+                    <div class="segmented-control large">
+                        <button class="segment active">Profile</button>
+                        <button class="segment">Pocket</button>
+                        <button class="segment">V-Carve</button>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">Target Depth</label>
+                    <div class="input-with-suffix">
+                        <input type="text" class="input-field mono" value="-5.00" placeholder="-5.00">
+                        <span class="input-suffix">mm</span>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Cut Side</label>
+                    <div class="segmented-control">
+                        <button class="segment active">Outside</button>
+                        <button class="segment">Inside</button>
+                        <button class="segment">On Line</button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Tool</label>
+                    <select class="select-field">
+                        <option>6mm Endmill</option>
+                        <option>60° V-Bit</option>
+                        <option>3mm Ballnose</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Selection</label>
+                    <div class="selection-info">
+                        <span class="selection-count">4 curves will be used</span>
+                    </div>
+                    <p class="form-hint">Select curves on the canvas before adding an operation.</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" data-close-modal>Cancel</button>
+                <button class="btn-primary">Create Operation</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Tool Modal -->
+    <div class="modal-overlay" id="addToolModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>Add Tool</h2>
+                <button class="modal-close" data-close-modal>
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M5 5l10 10M15 5l-10 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Name</label>
+                    <input type="text" class="input-field" placeholder="e.g., 6mm Endmill">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Type</label>
+                    <div class="segmented-control">
+                        <button class="segment active">Endmill</button>
+                        <button class="segment">V-Bit</button>
+                        <button class="segment">Ballnose</button>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Diameter</label>
+                        <div class="input-with-suffix">
+                            <input type="text" class="input-field mono" placeholder="6.00">
+                            <span class="input-suffix">mm</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Stepover</label>
+                        <div class="input-with-suffix">
+                            <input type="text" class="input-field mono" placeholder="0.40">
+                            <span class="input-suffix">ratio</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Pass Depth</label>
+                    <div class="input-with-suffix">
+                        <input type="text" class="input-field mono" placeholder="3.00">
+                        <span class="input-suffix">mm</span>
+                    </div>
+                    <p class="form-hint">Maximum depth per cutting pass</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" data-close-modal>Cancel</button>
+                <button class="btn-primary">Save Tool</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

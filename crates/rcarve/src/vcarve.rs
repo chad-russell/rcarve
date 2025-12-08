@@ -155,7 +155,82 @@ pub fn generate_vcarve_toolpath_with_debug(
         .build()
         .map_err(|e| anyhow!("Voronoi build failed: {:?}", e))?;
 
+    // 3. Build Rails (Fixed Depth Pocketing) - Do this FIRST to check if offset collapses
+    // Only if max_depth is limited
+    let mut pocket_boundary_generated = false;
+    let mut _pocket_boundary_total_length = 0.0;
+    if let Some(max_depth_value) = max_depth {
+        let offset_delta = -max_radius;
+        
+        // Use shape_polylines which are already cleaned and oriented correctly
+        // (Outer CCW, Holes CW) for Clipper
+        let mut paths = Vec::new();
+        for pl in &shape_polylines {
+            let mut verts = Vec::new();
+            for i in 0..pl.vertex_count() {
+                let v = pl.at(i);
+                verts.push(CVertex::new(v.x, v.y));
+            }
+            if !verts.is_empty() {
+                paths.push(CPath::new(verts, true));
+            }
+        }
+
+        if !paths.is_empty() {
+            let polygon = CPolygon::new(paths, CPathType::Subject);
+            let input_polygons = CPolygons::new(vec![polygon]);
+            
+            let offset_polygons = inflate(
+                input_polygons,
+                offset_delta,
+                JoinType::Miter,
+                EndType::ClosedPolygon,
+                5.0, // Miter limit
+                0.0, // Arc tolerance
+            );
+            
+            for offset_poly in offset_polygons.polygons() {
+                for path in offset_poly.paths() {
+                    let points: Vec<[f64; 2]> = path.vertices().iter().map(|v| [v.x(), v.y()]).collect();
+                    if points.len() < 3 { continue; } // Need at least 3 points for a valid polygon
+                    
+                    // Calculate path length to detect degenerate/tiny results
+                    let mut path_length = 0.0;
+                    for i in 0..points.len() {
+                        let p1 = points[i];
+                        let p2 = points[(i + 1) % points.len()];
+                        path_length += ((p2[0] - p1[0]).powi(2) + (p2[1] - p1[1]).powi(2)).sqrt();
+                    }
+                    
+                    // Skip degenerate paths (perimeter < 1mm is essentially collapsed)
+                    if path_length < 1.0 { continue; }
+                    
+                    let mut closed_points = points.clone();
+                    if let (Some(first), Some(last)) = (closed_points.first(), closed_points.last()) {
+                         if (first[0] - last[0]).abs() > 1e-6 || (first[1] - last[1]).abs() > 1e-6 {
+                             closed_points.push(*first);
+                         }
+                    }
+                    
+                    output_paths.push(PathType::PocketBoundary {
+                        path: closed_points.clone(),
+                        depth: max_depth_value,
+                    });
+                    pocket_boundary_generated = true;
+                    _pocket_boundary_total_length += path_length;
+                    
+                    if let Some(ref mut debug) = debug_output {
+                        debug.pocket_boundary_paths.push(closed_points);
+                    }
+                }
+            }
+        }
+    }
+
     // 2. Iterate Edges and Prune (The Spine)
+    // If pocket boundary collapsed, we need to generate constant-depth paths as fallback
+    let fallback_to_constant_depth = max_depth.is_some() && !pocket_boundary_generated;
+    
     for edge_rc in diagram.edges() {
         let edge = edge_rc.get();
         
@@ -209,7 +284,14 @@ pub fn generate_vcarve_toolpath_with_debug(
         }
 
         // Sample the edge into 3D moves (can be multiple segments if depth limited)
-        let sample_chains = sample_edge_to_3d(&edge, &diagram, tan_half_angle, max_depth_value, &shape_polylines);
+        let sample_chains = sample_edge_to_3d(
+            &edge, 
+            &diagram, 
+            tan_half_angle, 
+            max_depth_value, 
+            &shape_polylines,
+            fallback_to_constant_depth,
+        );
         
         // Convert samples to PathType::Crease
         for samples in sample_chains {
@@ -228,63 +310,6 @@ pub fn generate_vcarve_toolpath_with_debug(
                             [p1.0, p1.1, p1.2],
                             [p2.0, p2.1, p2.2],
                         ]);
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Build Rails (Fixed Depth Pocketing)
-    // Only if max_depth is limited
-    if let Some(max_depth_value) = max_depth {
-        let offset_delta = -max_radius;
-        
-        // Use shape_polylines which are already cleaned and oriented correctly
-        // (Outer CCW, Holes CW) for Clipper
-        let mut paths = Vec::new();
-        for pl in &shape_polylines {
-            let mut verts = Vec::new();
-            for i in 0..pl.vertex_count() {
-                let v = pl.at(i);
-                verts.push(CVertex::new(v.x, v.y));
-            }
-            if !verts.is_empty() {
-                paths.push(CPath::new(verts, true));
-            }
-        }
-
-        if !paths.is_empty() {
-            let polygon = CPolygon::new(paths, CPathType::Subject);
-            let input_polygons = CPolygons::new(vec![polygon]);
-            
-            let offset_polygons = inflate(
-                input_polygons,
-                offset_delta,
-                JoinType::Miter,
-                EndType::ClosedPolygon,
-                5.0, // Miter limit
-                0.0, // Arc tolerance
-            );
-            
-            for offset_poly in offset_polygons.polygons() {
-                for path in offset_poly.paths() {
-                    let points: Vec<[f64; 2]> = path.vertices().iter().map(|v| [v.x(), v.y()]).collect();
-                    if points.len() < 2 { continue; }
-                    
-                    let mut closed_points = points.clone();
-                    if let (Some(first), Some(last)) = (closed_points.first(), closed_points.last()) {
-                         if (first[0] - last[0]).abs() > 1e-6 || (first[1] - last[1]).abs() > 1e-6 {
-                             closed_points.push(*first);
-                         }
-                    }
-                    
-                    output_paths.push(PathType::PocketBoundary {
-                        path: closed_points.clone(),
-                        depth: max_depth_value,
-                    });
-                    
-                    if let Some(ref mut debug) = debug_output {
-                        debug.pocket_boundary_paths.push(closed_points);
                     }
                 }
             }
@@ -504,7 +529,8 @@ fn sample_edge_to_3d(
     diagram: &Diagram<F>, 
     tan_half_angle: f64,
     max_depth: f64, 
-    polylines: &[Polyline]
+    polylines: &[Polyline],
+    fallback_to_constant_depth: bool,
 ) -> Vec<Vec<(f64, f64, f64)>> {
     let v0_idx = edge.vertex0();
     if v0_idx.is_none() {
@@ -542,6 +568,9 @@ fn sample_edge_to_3d(
     let end = DVec2::new(p1.x() as f64 / SCALE, p1.y() as f64 / SCALE);
     
     let max_radius = max_depth * tan_half_angle;
+    
+    // Small overlap extension (in mm) to ensure clean junction with pocket boundary
+    const OVERLAP_EXTENSION: f64 = 0.1;
 
     // Collect raw samples with radius
     let mut raw_samples: Vec<Option<(DVec2, f64)>> = Vec::new();
@@ -588,6 +617,27 @@ fn sample_edge_to_3d(
         }
     }
 
+    // Calculate Z based on radius, but clamp to max_depth
+    // This ensures we always generate paths even in "too deep" zones
+    let get_z = |r: f64| -> f64 {
+         -(r / tan_half_angle).min(max_depth)
+    };
+    
+    // Check if the entire edge is in the "deep" zone (all points have r > max_radius)
+    // If so, and we're not in fallback mode, skip this edge entirely - the pocket
+    // boundary will handle it.
+    if !fallback_to_constant_depth {
+        let all_deep = raw_samples.iter().all(|s| {
+            match s {
+                Some((_, r)) => *r > max_radius,
+                None => true,
+            }
+        });
+        if all_deep {
+            return Vec::new();
+        }
+    }
+
     let mut chains = Vec::new();
     let mut current_chain = Vec::new();
     
@@ -606,40 +656,75 @@ fn sample_edge_to_3d(
         let (u_pt, u_r) = u_opt.unwrap();
         let (v_pt, v_r) = v_opt.unwrap();
         
-        let u_valid = u_r <= max_radius;
-        let v_valid = v_r <= max_radius;
-        
-        if u_valid && v_valid {
+        // Check if this segment is in the "shallow" zone (r <= max_radius) where we
+        // generate variable-depth creases, or the "deep" zone (r > max_radius) where
+        // we generate constant-depth paths at max_depth.
+        let u_shallow = u_r <= max_radius;
+        let v_shallow = v_r <= max_radius;
+
+        if u_shallow && v_shallow {
+            // Both points are in shallow zone - variable depth crease
             if current_chain.is_empty() {
-                current_chain.push((u_pt.x, u_pt.y, -(u_r / tan_half_angle)));
+                current_chain.push((u_pt.x, u_pt.y, get_z(u_r)));
             }
-            current_chain.push((v_pt.x, v_pt.y, -(v_r / tan_half_angle)));
-        } else if u_valid && !v_valid {
+            current_chain.push((v_pt.x, v_pt.y, get_z(v_r)));
+        } else if u_shallow && !v_shallow {
+            // Transition from shallow to deep
             if current_chain.is_empty() {
-                current_chain.push((u_pt.x, u_pt.y, -(u_r / tan_half_angle)));
+                current_chain.push((u_pt.x, u_pt.y, get_z(u_r)));
             }
-            // Interpolate transition point
+            // Interpolate the exact transition point where r == max_radius
             let t = (max_radius - u_r) / (v_r - u_r);
             let pt = u_pt + (v_pt - u_pt) * t;
             current_chain.push((pt.x, pt.y, -max_depth));
             
+            // Add overlap extension: extend slightly past the transition point
+            // This ensures clean junction with pocket boundary (no tiny gap)
+            let dir = (v_pt - u_pt).normalize_or_zero();
+            if dir != DVec2::ZERO {
+                let extended_pt = pt + dir * OVERLAP_EXTENSION;
+                current_chain.push((extended_pt.x, extended_pt.y, -max_depth));
+            }
+            
+            // End this chain at the transition - the pocket boundary will handle the deep zone
             chains.push(current_chain);
             current_chain = Vec::new();
-        } else if !u_valid && v_valid {
+        } else if !u_shallow && v_shallow {
+            // Transition from deep to shallow
             if !current_chain.is_empty() {
                 chains.push(current_chain);
                 current_chain = Vec::new();
             }
-            // Interpolate transition point
+            // Interpolate the exact transition point where r == max_radius
             let t = (max_radius - u_r) / (v_r - u_r);
             let pt = u_pt + (v_pt - u_pt) * t;
+            
+            // Add overlap extension: start slightly before the transition point
+            // This ensures clean junction with pocket boundary (no tiny gap)
+            let dir = (v_pt - u_pt).normalize_or_zero();
+            if dir != DVec2::ZERO {
+                let extended_pt = pt - dir * OVERLAP_EXTENSION;
+                current_chain.push((extended_pt.x, extended_pt.y, -max_depth));
+            }
+            
             current_chain.push((pt.x, pt.y, -max_depth));
-            current_chain.push((v_pt.x, v_pt.y, -(v_r / tan_half_angle)));
+            current_chain.push((v_pt.x, v_pt.y, get_z(v_r)));
         } else {
-            // Both invalid - skip
-             if !current_chain.is_empty() {
-                chains.push(current_chain);
-                current_chain = Vec::new();
+            // Both in deep zone
+            if fallback_to_constant_depth {
+                // Pocket boundary collapsed - generate path at constant max_depth
+                // This ensures we don't have gaps when the entire medial axis is "too deep"
+                // but the offset also collapsed
+                if current_chain.is_empty() {
+                    current_chain.push((u_pt.x, u_pt.y, -max_depth));
+                }
+                current_chain.push((v_pt.x, v_pt.y, -max_depth));
+            } else {
+                // Skip this segment - the pocket boundary will handle the deep zone
+                if !current_chain.is_empty() {
+                    chains.push(current_chain);
+                    current_chain = Vec::new();
+                }
             }
         }
     }
